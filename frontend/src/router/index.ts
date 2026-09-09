@@ -1,8 +1,9 @@
 import { createRouter, createWebHistory } from "vue-router";
 import type { RouteRecordRaw } from "vue-router";
 import BasicLayout from "../layouts/BasicLayout.vue";
-import { useUserStore } from "../stores/user";
+import { useUserStore, type UserRole } from "../stores/user";
 
+/** 路由权限：roles 省略表示全部角色可见 */
 const routes: RouteRecordRaw[] = [
   {
     path: "/login",
@@ -25,19 +26,49 @@ const routes: RouteRecordRaw[] = [
         path: "lowcode",
         name: "LowCode",
         component: () => import("../views/lowcode/index.vue"),
-        meta: { title: "AI 低代码", icon: "MagicStick" },
+        meta: { title: "低代码开发平台", icon: "MagicStick", roles: ["admin"] as UserRole[] },
+      },
+      {
+        path: "apps",
+        name: "Apps",
+        component: () => import("../views/apps/index.vue"),
+        meta: { title: "应用中心", icon: "Star" },
+      },
+      {
+        path: "app/:kind/:id",
+        name: "AppRuntime",
+        component: () => import("../views/apps/AppRuntime.vue"),
+        meta: { title: "应用运行" },
+      },
+      {
+        path: "production",
+        name: "Production",
+        component: () => import("../views/production/index.vue"),
+        meta: { title: "排产管理", icon: "Operation", roles: ["admin", "operator"] as UserRole[] },
+      },
+      {
+        path: "samples",
+        name: "Samples",
+        component: () => import("../views/samples/index.vue"),
+        meta: { title: "样品管理", icon: "Box", roles: ["admin", "operator"] as UserRole[] },
+      },
+      {
+        path: "logs",
+        name: "Logs",
+        component: () => import("../views/logs/index.vue"),
+        meta: { title: "操作日志", icon: "Notebook", roles: ["admin"] as UserRole[] },
       },
       {
         path: "user",
         name: "User",
         component: () => import("../views/user/index.vue"),
-        meta: { title: "用户管理", icon: "UserFilled" },
+        meta: { title: "用户管理", icon: "UserFilled", roles: ["admin"] as UserRole[] },
       },
       {
         path: "setting",
         name: "Setting",
         component: () => import("../views/setting/index.vue"),
-        meta: { title: "系统设置", icon: "Setting" },
+        meta: { title: "系统设置", icon: "Setting", roles: ["admin"] as UserRole[] },
       },
     ],
   },
@@ -52,17 +83,19 @@ const router = createRouter({
   routes,
 });
 
-// 全局前置守卫：未登录跳转到登录页
+// 全局前置守卫：未登录跳转到登录页；角色不满足返回仪表盘
 router.beforeEach((to, _from, next) => {
   const userStore = useUserStore();
-  document.title = (to.meta.title as string) || "SaaS 管理后台";
+  document.title = (to.meta.title as string) || "实验室数字化管理平台";
 
   if (to.meta.public) {
     next();
-  } else if (userStore.token) {
-    next();
-  } else {
+  } else if (!userStore.token) {
     next("/login");
+  } else if ((to.meta.roles as UserRole[] | undefined) && !userStore.hasRole(to.meta.roles as UserRole[])) {
+    next("/dashboard");
+  } else {
+    next();
   }
 });
 

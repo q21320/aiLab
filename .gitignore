@@ -5,6 +5,9 @@ node_modules/
 dist/
 build/
 
+# Backend runtime data (low-code published apps)
+backend/data/
+
 # Environment variables
 .env
 .env.local

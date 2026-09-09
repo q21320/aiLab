@@ -2,9 +2,12 @@
 import { reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import type { FormInstance } from "element-plus";
+import { Download, Upload, FolderOpened } from "@element-plus/icons-vue";
 import { useUserStore } from "../../stores/user";
+import { useAuditStore } from "../../stores/audit";
 
 const userStore = useUserStore();
+const auditStore = useAuditStore();
 
 // 基本设置
 const basicForm = reactive({
@@ -63,8 +66,101 @@ function changePassword() {
   pwdRef.value?.validate((valid) => {
     if (!valid) return;
     ElMessage.success("密码修改成功");
+    auditStore.log("安全", "修改密码", "修改了登录密码");
     pwdRef.value?.resetFields();
   });
+}
+
+// ---------------------------------------------------------------------------
+// 数据备份与恢复（4.8：存储≥3年，支持备份恢复）
+// ---------------------------------------------------------------------------
+const backupOnline = ref(false);
+const snapshots = ref<string[]>([]);
+const restoreInput = ref("");
+const fileInput = ref<HTMLInputElement | null>(null);
+
+async function refreshBackup() {
+  try {
+    const r = await fetch("/api/backup/snapshots");
+    if (r.ok) {
+      const d = await r.json();
+      snapshots.value = d.files || [];
+      backupOnline.value = true;
+    } else {
+      backupOnline.value = false;
+    }
+  } catch {
+    backupOnline.value = false;
+  }
+}
+refreshBackup();
+
+async function doSnapshot() {
+  try {
+    const r = await fetch("/api/backup/snapshot", { method: "POST" });
+    const d = await r.json();
+    if (d.ok) {
+      ElMessage.success(`备份快照已生成：${d.file}`);
+      auditStore.log("存储", "备份", `生成备份快照 ${d.file}`);
+      refreshBackup();
+    } else {
+      ElMessage.error("备份失败：" + (d.error || ""));
+    }
+  } catch {
+    ElMessage.error("无法连接后端，请先启动 npm start（backend）");
+  }
+}
+
+async function doExport() {
+  try {
+    const r = await fetch("/api/backup");
+    const d = await r.json();
+    const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ailab-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    ElMessage.success("备份已导出下载");
+  } catch {
+    ElMessage.error("无法连接后端");
+  }
+}
+
+async function doRestore() {
+  if (!restoreInput.value.trim()) {
+    ElMessage.warning("请粘贴备份 JSON 或选择备份文件");
+    return;
+  }
+  try {
+    const data = JSON.parse(restoreInput.value);
+    const r = await fetch("/api/backup/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      ElMessage.success("恢复成功，刷新页面后生效");
+      auditStore.log("存储", "恢复备份", "从备份 JSON 恢复数据");
+    } else {
+      ElMessage.error("恢复失败：" + (d.error || ""));
+    }
+  } catch {
+    ElMessage.error("备份 JSON 解析失败，请粘贴完整备份内容");
+  }
+}
+
+function pickBackupFile(e: Event) {
+  const file = (e.target as HTMLInputElement)?.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    restoreInput.value = String(reader.result || "");
+    ElMessage.success(`已载入备份文件：${file.name}`);
+  };
+  reader.readAsText(file);
 }
 </script>
 
@@ -150,6 +246,34 @@ function changePassword() {
             </el-form-item>
           </el-form>
         </el-tab-pane>
+        <!-- 数据备份 -->
+        <el-tab-pane label="数据备份">
+          <el-alert
+            :title="backupOnline ? '后端已连接，支持快照 / 导出 / 恢复（数据文件位于 backend/data）' : '后端未连接，请先启动：cd backend && npm start'"
+            :type="backupOnline ? 'success' : 'warning'"
+            :closable="false"
+            show-icon
+            class="mb16"
+          />
+          <div class="backup-actions">
+            <el-button type="primary" :icon="FolderOpened" @click="doSnapshot">生成快照</el-button>
+            <el-button :icon="Download" @click="doExport">导出备份文件</el-button>
+            <el-button :icon="Upload" @click="fileInput?.click()">载入备份文件</el-button>
+            <el-button type="success" :icon="Upload" @click="doRestore">恢复数据</el-button>
+            <input ref="fileInput" type="file" accept="application/json" class="hidden-input" @change="pickBackupFile" />
+          </div>
+          <div v-if="snapshots.length" class="snap-list">
+            <div class="snap-title">服务端快照列表（backend/data/backups，自动保留最近 20 份）</div>
+            <div v-for="f in snapshots" :key="f" class="snap-item">
+              <el-icon><FolderOpened /></el-icon>
+              <span>{{ f }}</span>
+            </div>
+          </div>
+          <p class="hint">
+            说明：数据持久化在服务端（apps.json / iot.json），快照与备份 JSON 可长期归档（≥3 年要求），
+            恢复时全量覆盖当前数据；前端设计稿另存于浏览器 localStorage（可导出 JSON 后随备份归档）。
+          </p>
+        </el-tab-pane>
       </el-tabs>
     </el-card>
   </div>
@@ -162,6 +286,42 @@ function changePassword() {
 }
 .mb16 {
   margin-bottom: 16px;
-  max-width: 560px;
+  max-width: 640px;
+}
+.backup-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.hidden-input {
+  display: none;
+}
+.snap-list {
+  max-width: 640px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.snap-title {
+  font-weight: 600;
+  color: #1f2d3d;
+  margin-bottom: 8px;
+}
+.snap-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #606266;
+  padding: 4px 0;
+  font-family: monospace;
+}
+.hint {
+  max-width: 640px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.8;
+  margin-top: 12px;
 }
 </style>

@@ -19,7 +19,7 @@ const SYSTEM_PROMPT = `你是一个 AI 低代码页面生成器。根据用户�
 5. 页面内容要丰富完整，不要只有空壳——要有真实的中文文案、示例数据
 6. 布局要美观合理，善用 container + style 做排版
 
-## 17 种组件类型及属性
+## 22 种组件类型及属性
 
 ### page（页面根）
 - children: 子节点数组
@@ -46,6 +46,20 @@ const SYSTEM_PROMPT = `你是一个 AI 低代码页面生成器。根据用户�
 ### input（输入框）
 - props: { placeholder, type: "text"|"password"|"textarea", clearable: true, showPassword: true, rows: 数字 }
 - style: { width, marginBottom }
+
+### number（数字输入）
+- props: { min: 数字, max: 数字, step: 数字 }
+
+### date（日期选择）
+- props: { placeholder: "选择日期" }
+
+### switch（开关，无文本）
+
+### radio（单选组）
+- props: { options: ["选项1", "选项2", ...] }
+
+### checkbox（多选组）
+- props: { options: ["选项A", "选项B", ...] }
 
 ### select（下拉选择）
 - props: { placeholder, options: ["选项1", "选项2", ...] }

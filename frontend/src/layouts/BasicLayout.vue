@@ -1,33 +1,77 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useUserStore } from "../stores/user";
 import {
   Fold,
   Expand,
   Odometer,
-  MagicStick,
+  Grid,
+  Star,
   UserFilled,
   Setting,
   ArrowDown,
+  Document,
+  Tickets,
+  Connection,
+  DataAnalysis,
+  Monitor,
+  Operation,
+  Box,
+  Notebook,
 } from "@element-plus/icons-vue";
+import {
+  usePublishStore,
+  PUBLISH_KIND_ROUTE,
+  type PublishKind,
+} from "../lowcode/publish";
+import { ROLE_LABELS, type UserRole } from "../stores/user";
 
 const route = useRoute();
 const router = useRouter();
 const userStore = useUserStore();
+const publishStore = usePublishStore();
+
+onMounted(() => publishStore.init());
 
 const isCollapse = ref(false);
 
 // 当前高亮菜单跟随路由
 const activeMenu = computed(() => route.path);
 
-// 侧边栏菜单项
+// 侧边栏菜单项（按角色过滤，4.9 三级权限）
 const menus = [
-  { path: "/dashboard", title: "仪表盘", icon: Odometer },
-  { path: "/lowcode", title: "AI 低代码", icon: MagicStick },
-  { path: "/user", title: "用户管理", icon: UserFilled },
-  { path: "/setting", title: "系统设置", icon: Setting },
+  { path: "/dashboard", title: "仪表盘", icon: Odometer, roles: [] as UserRole[] },
+  { path: "/lowcode", title: "低代码平台", icon: Grid, roles: ["admin"] as UserRole[] },
+  { path: "/apps", title: "应用中心", icon: Star, roles: [] as UserRole[] },
+  { path: "/production", title: "排产管理", icon: Operation, roles: ["admin", "operator"] as UserRole[] },
+  { path: "/samples", title: "样品管理", icon: Box, roles: ["admin", "operator"] as UserRole[] },
+  { path: "/logs", title: "操作日志", icon: Notebook, roles: ["admin"] as UserRole[] },
+  { path: "/user", title: "用户管理", icon: UserFilled, roles: ["admin"] as UserRole[] },
+  { path: "/setting", title: "系统设置", icon: Setting, roles: ["admin"] as UserRole[] },
 ];
+const visibleMenus = computed(() => menus.filter((m) => (m.roles.length ? m.roles.includes(userStore.role) : true)));
+
+// 已发布且「挂载菜单+启用」的应用，动态出现在左侧导航
+const menuApps = computed(() =>
+  publishStore.apps.filter((a) => a.menu && a.enable)
+);
+const KIND_MENU_ICONS: Record<PublishKind, any> = {
+  page: Document,
+  form: Tickets,
+  flow: Connection,
+  report: DataAnalysis,
+  screen: Monitor,
+};
+function appMenuIcon(kind: PublishKind) {
+  return KIND_MENU_ICONS[kind];
+}
+function appMenuIndex(kind: PublishKind, id: string): string {
+  return `/app/${PUBLISH_KIND_ROUTE[kind]}/${id}`;
+}
+function roleLabel(role: string): string {
+  return ROLE_LABELS[role as UserRole] || role;
+}
 
 // 顶部用户下拉菜单
 function handleCommand(command: string) {
@@ -56,9 +100,18 @@ function handleCommand(command: string) {
         active-text-color="#ffffff"
         class="menu"
       >
-        <el-menu-item v-for="m in menus" :key="m.path" :index="m.path">
+        <el-menu-item v-for="m in visibleMenus" :key="m.path" :index="m.path">
           <el-icon><component :is="m.icon" /></el-icon>
           <template #title>{{ m.title }}</template>
+        </el-menu-item>
+        <!-- 已挂载的低代码应用（应用中心开启「挂载菜单」后出现） -->
+        <el-menu-item
+          v-for="a in menuApps"
+          :key="a.kind + a.id"
+          :index="appMenuIndex(a.kind, a.id)"
+        >
+          <el-icon><component :is="appMenuIcon(a.kind)" /></el-icon>
+          <template #title>{{ a.name }}</template>
         </el-menu-item>
       </el-menu>
     </el-aside>
@@ -82,6 +135,7 @@ function handleCommand(command: string) {
                 {{ userStore.name?.charAt(0) || "U" }}
               </el-avatar>
               <span class="username">{{ userStore.name || "用户" }}</span>
+              <el-tag size="small" effect="dark" type="warning" class="role-tag">{{ roleLabel(userStore.role) }}</el-tag>
               <el-icon><ArrowDown /></el-icon>
             </span>
             <template #dropdown>

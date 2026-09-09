@@ -66,6 +66,29 @@ function renderNode(node: SchemaNode, level: number): string {
         .join("\n");
       return `${pad}<el-select${ph}${style}>\n${opts}\n${pad}</el-select>`;
     }
+    case "number": {
+      const min = p.min != null ? ` :min="${p.min}"` : "";
+      const max = p.max != null ? ` :max="${p.max}"` : "";
+      return `${pad}<el-input-number${min}${max}${style} />`;
+    }
+    case "date": {
+      const ph = p.placeholder ? ` placeholder="${esc(p.placeholder)}"` : "";
+      return `${pad}<el-date-picker type="date"${ph}${style} />`;
+    }
+    case "switch":
+      return `${pad}<el-switch${style} />`;
+    case "radio": {
+      const opts = (p.options || [])
+        .map((o: string) => `${indent(level + 1)}<el-radio label="${esc(o)}">${esc(o)}</el-radio>`)
+        .join("\n");
+      return `${pad}<el-radio-group${style}>\n${opts}\n${pad}</el-radio-group>`;
+    }
+    case "checkbox": {
+      const opts = (p.options || [])
+        .map((o: string) => `${indent(level + 1)}<el-checkbox label="${esc(o)}">${esc(o)}</el-checkbox>`)
+        .join("\n");
+      return `${pad}<el-checkbox-group${style}>\n${opts}\n${pad}</el-checkbox-group>`;
+    }
     case "form": {
       const lw = p.labelWidth ? ` label-width="${p.labelWidth}"` : "";
       return `${pad}<el-form${lw}${style}>\n${kids}\n${pad}</el-form>`;

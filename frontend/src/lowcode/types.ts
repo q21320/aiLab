@@ -1,4 +1,6 @@
-// 低代码页面的 Schema 类型定义
+// ============================================================================
+// 低代码平台 · 页面设计 Schema 类型定义
+// ============================================================================
 
 /** 支持的组件类型 */
 export type NodeType =
@@ -8,6 +10,11 @@ export type NodeType =
   | "text"
   | "button"
   | "input"
+  | "number"
+  | "date"
+  | "switch"
+  | "radio"
+  | "checkbox"
   | "select"
   | "form"
   | "formItem"
@@ -49,7 +56,7 @@ export interface PageSchema extends SchemaNode {
   children: SchemaNode[];
 }
 
-/** 组件类型的中文名称，用于属性面板与选中提示 */
+/** 页面组件的默认属性映射（属性面板回退值与 Schema 约定） */
 export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   page: "页面",
   container: "容器",
@@ -57,6 +64,11 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   text: "文本",
   button: "按钮",
   input: "输入框",
+  number: "数字输入",
+  date: "日期选择",
+  switch: "开关",
+  radio: "单选",
+  checkbox: "多选",
   select: "下拉选择",
   form: "表单",
   formItem: "表单项",
@@ -69,3 +81,15 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   tag: "标签",
   space: "间距",
 };
+
+/** 允许挂载子节点的容器类型 */
+export const CONTAINER_TYPES: NodeType[] = [
+  "page",
+  "container",
+  "form",
+  "formItem",
+  "card",
+  "row",
+  "col",
+  "space",
+];

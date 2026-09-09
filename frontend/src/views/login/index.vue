@@ -23,20 +23,17 @@ const rules: FormRules = {
 };
 
 function handleLogin() {
-  formRef.value?.validate((valid) => {
+  formRef.value?.validate(async (valid) => {
     if (!valid) return;
     loading.value = true;
-    // 模拟异步登录请求
-    setTimeout(() => {
-      const ok = userStore.login(form.username, form.password);
-      loading.value = false;
-      if (ok) {
-        ElMessage.success("登录成功");
-        router.push("/dashboard");
-      } else {
-        ElMessage.error("用户名或密码不能为空");
-      }
-    }, 600);
+    const ok = await userStore.login(form.username, form.password);
+    loading.value = false;
+    if (ok) {
+      ElMessage.success(`登录成功：${userStore.name}（${userStore.role === "admin" ? "管理员" : userStore.role === "operator" ? "工程师" : "访客"}）`);
+      router.push("/dashboard");
+    } else {
+      ElMessage.error("用户名或密码错误");
+    }
   });
 }
 </script>
@@ -78,7 +75,10 @@ function handleLogin() {
           </el-button>
         </el-form-item>
       </el-form>
-      <div class="login-tip">默认账号：admin / 123456</div>
+      <div class="login-tip">
+        演示账号（三级权限）：admin / admin123（管理员）· engineer / eng123（工程师）· viewer / view123（访客）
+      </div>
+      <div class="login-tip">密码以 SHA-256 散列存储，操作均写入审计日志</div>
     </div>
   </div>
 </template>
