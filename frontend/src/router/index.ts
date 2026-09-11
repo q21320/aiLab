@@ -41,6 +41,24 @@ const routes: RouteRecordRaw[] = [
         meta: { title: "应用运行" },
       },
       {
+        path: "formdata",
+        name: "FormData",
+        component: () => import("../views/formdata/index.vue"),
+        meta: { title: "表单数据", icon: "Document", roles: ["admin", "operator"] as UserRole[] },
+      },
+      {
+        path: "iot",
+        name: "IotDevices",
+        component: () => import("../views/iot/index.vue"),
+        meta: { title: "设备接入", icon: "Monitor", roles: ["admin", "operator"] as UserRole[] },
+      },
+      {
+        path: "autotest",
+        name: "AutoTest",
+        component: () => import("../views/autotest/index.vue"),
+        meta: { title: "自动化测试", icon: "Cpu", roles: ["admin", "operator"] as UserRole[] },
+      },
+      {
         path: "production",
         name: "Production",
         component: () => import("../views/production/index.vue"),
@@ -51,6 +69,12 @@ const routes: RouteRecordRaw[] = [
         name: "Samples",
         component: () => import("../views/samples/index.vue"),
         meta: { title: "样品管理", icon: "Box", roles: ["admin", "operator"] as UserRole[] },
+      },
+      {
+        path: "menus",
+        name: "Menus",
+        component: () => import("../views/menu/index.vue"),
+        meta: { title: "导航菜单", icon: "Menu", roles: ["admin"] as UserRole[] },
       },
       {
         path: "logs",

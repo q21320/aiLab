@@ -4,6 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "build:exe": "node ../tools/build-exe.mjs",
+    "build:exe:fast": "node ../tools/build-exe.mjs --skip-frontend"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6"
   }
 }

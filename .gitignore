@@ -8,6 +8,10 @@ build/
 # Backend runtime data (low-code published apps)
 backend/data/
 
+# 打包产物（exe 约 92MB 及中间产物，不入库）
+release/
+backend/build/
+
 # Environment variables
 .env
 .env.local

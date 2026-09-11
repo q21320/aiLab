@@ -133,6 +133,18 @@ function renderNode(node: SchemaNode, level: number): string {
     }
     case "space":
       return `${pad}<el-space${style}>\n${kids}\n${pad}</el-space>`;
+    case "crudTable": {
+      const resource = (p.resource as string) || "";
+      const api = (p.api as string) || "";
+      const cols = (p.columns || []).map((c: any) => c.label || c.prop).join(" / ");
+      return [
+        `${pad}<!-- 数据表格（CRUD）：列 ${cols}`,
+        `${pad}     数据源：${resource ? `平台通用接口 /api/crud/${resource}` : api || "未配置"}`,
+        `${pad}     接口约定：GET 列表 {list,total,page,pageSize} / POST 新增 / PUT 修改 / DELETE 删除`,
+        `${pad}     运行时由平台渲染；如自研后端，请按此约定实现，或在平台内配置 api 模板对接已有接口 -->`,
+        `${pad}<div class="crud-table-placeholder" data-resource="${resource}"></div>`,
+      ].join("\n");
+    }
     default:
       return `${pad}<!-- 未知组件: ${node.type} -->`;
   }

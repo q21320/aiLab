@@ -31,7 +31,11 @@ const filtered = computed(() =>
 const backendText = computed(() => {
   if (store.backendOnline === null) return { type: "info" as const, text: "正在连接后端接口..." };
   if (store.backendOnline) return { type: "success" as const, text: "后端接口已连接（/api/lowcode/apps）" };
-  return { type: "warning" as const, text: "未连接后端（后端未启动），当前为本地存储模式，功能不受影响" };
+  const reason = store.lastSyncError ? `：${store.lastSyncError}` : "";
+  return {
+    type: "warning" as const,
+    text: `未连接后端（应用仅保存在浏览器本地，功能可用）${reason}`,
+  };
 });
 
 function openApp(app: PublishedApp) {

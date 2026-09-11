@@ -19,6 +19,8 @@ export interface IotLiveState {
   points: IotPoint[];
   /** 设备历史（后端在线时从 /history 拉取后维护） */
   histories: Record<string, IotPoint[]>;
+  /** 自动化测试实时事件（执行进度/采样/判定） */
+  autotest: any;
 }
 
 export const iotLive = reactive<IotLiveState>({
@@ -29,6 +31,7 @@ export const iotLive = reactive<IotLiveState>({
   alerts: [],
   points: [],
   histories: {},
+  autotest: null,
 });
 
 /** 本地模拟数据（离线兜底），种子固定保证稳定演示 */
@@ -122,6 +125,7 @@ function connect() {
       if (data.devices) iotLive.devices = data.devices;
       if (data.overview) iotLive.overview = data.overview;
       if (data.alerts) iotLive.alerts = data.alerts;
+      if (data.autotest) iotLive.autotest = data.autotest;
       if (data.points) {
         iotLive.points = data.points;
         for (const p of data.points) {

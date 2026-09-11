@@ -6,6 +6,7 @@ import { NODE_TYPE_LABELS, CONTAINER_TYPES } from "./types";
 import { LC_DRAG_KEY, LC_ACTIONS_KEY } from "./lcCore";
 // 组件递归引用自身，用于渲染子节点
 import SchemaRenderer from "./SchemaRenderer.vue";
+import CrudTable from "./CrudTable.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -343,6 +344,11 @@ const allBinds = computed(() => ({ ...binds.value, ...containerBinds.value }));
   <el-select v-else-if="node.type === 'select'" v-bind="binds" :placeholder="p.placeholder">
     <el-option v-for="opt in p.options || []" :key="opt" :label="opt" :value="opt" />
   </el-select>
+
+  <!-- 数据表格（CRUD，自动对接数据源：搜索/分页/新建/编辑/删除） -->
+  <div v-else-if="node.type === 'crudTable'" v-bind="binds">
+    <CrudTable :node="node" :editable="editable" />
+  </div>
 
   <!-- 表格 -->
   <el-table v-else-if="node.type === 'table'" v-bind="binds" :data="p.data || []" :border="p.border">

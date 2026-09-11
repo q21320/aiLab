@@ -12,6 +12,7 @@ import {
 import SchemaRenderer from "../../lowcode/SchemaRenderer.vue";
 import ReportBlockView from "../../lowcode/ReportBlockView.vue";
 import ScreenWidgetView from "../../lowcode/ScreenWidgetView.vue";
+import { submitToCustomApi, submitToPlatform } from "../../api/forms";
 import type { FormSchema } from "../../lowcode/formTypes";
 import type { FlowSchema, FlowEdge, FlowNode } from "../../lowcode/flowTypes";
 import { FLOW_NODE_SIZE } from "../../lowcode/flowTypes";
@@ -72,6 +73,8 @@ const formRules = computed<FormRules>(() => {
   return rules;
 });
 const submitted = ref("");
+const submittedId = ref("");
+const submitting = ref(false);
 function resetForm() {
   formData.value = {};
   for (const f of formSchema.value?.fields || []) {
@@ -79,6 +82,7 @@ function resetForm() {
       f.defaultValue ?? (f.type === "checkbox" ? [] : f.type === "switch" ? false : "");
   }
   submitted.value = "";
+  submittedId.value = "";
 }
 watch(app, () => resetForm(), { immediate: true });
 
@@ -88,23 +92,26 @@ async function submitForm() {
     ElMessage.warning("请检查必填项");
     return;
   }
-  const api = formSchema.value?.submitApi;
-  if (api) {
-    try {
-      const res = await fetch(api, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData.value),
-      });
-      if (res.ok) ElMessage.success("提交成功");
-      else ElMessage.error(`提交失败：服务端返回 ${res.status}`);
-    } catch {
-      ElMessage.error("提交失败：无法连接提交接口，请检查 submitApi 配置");
+  submitting.value = true;
+  try {
+    const custom = (formSchema.value?.submitApi || "").trim();
+    const res = custom
+      ? await submitToCustomApi(custom, formData.value)
+      : await submitToPlatform(
+          app.value?.id || "form",
+          app.value?.name || formSchema.value?.name || "",
+          formData.value
+        );
+    if (res.ok) {
+      submittedId.value = res.id || "";
+      ElMessage.success(res.id ? `提交成功，提交编号 ${res.id}` : "提交成功");
+    } else {
+      ElMessage.error(`提交失败：${res.error || "未知错误"}`);
     }
-  } else {
-    ElMessage.success("校验通过（未配置提交 API，本次不发送请求）");
+  } finally {
+    submitting.value = false;
+    submitted.value = JSON.stringify(formData.value, null, 2);
   }
-  submitted.value = JSON.stringify(formData.value, null, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -299,12 +306,17 @@ async function fullscreen() {
                 </el-form-item>
               </el-col>
               <el-col :span="24">
-                <el-button type="primary" class="submit-btn" @click="submitForm">{{ formSchema.submitText || "提交" }}</el-button>
+                <el-button type="primary" class="submit-btn" :loading="submitting" @click="submitForm">{{ formSchema.submitText || "提交" }}</el-button>
               </el-col>
             </el-row>
           </el-form>
           <template v-if="submitted">
-            <el-divider>提交数据</el-divider>
+            <el-divider>
+              提交结果
+              <el-tag v-if="submittedId" size="small" type="success" effect="plain" style="margin-left: 8px">
+                提交编号 {{ submittedId }}
+              </el-tag>
+            </el-divider>
             <pre class="code-block">{{ submitted }}</pre>
           </template>
         </div>

@@ -361,8 +361,41 @@ registerPageComponent({
 
 // ---------- 数据组件 ----------
 registerPageComponent({
+  type: "crudTable",
+  label: "数据表格",
+  icon: "Coin",
+  category: "data",
+  canChildren: false,
+  tip: "自动对接数据源，含搜索/分页/新建/编辑/删除",
+  createDefault: () => ({
+    id: "",
+    type: "crudTable",
+    props: {
+      resource: "devices",
+      pageSize: 20,
+      searchable: true,
+      searchPlaceholder: "搜索",
+      allowCreate: true,
+      allowEdit: true,
+      allowDelete: true,
+      columns: [
+        { prop: "id", label: "设备ID", width: 160 },
+        { prop: "name", label: "设备名称", width: 180 },
+        { prop: "template", label: "设备母版" },
+      ],
+      formFields: [
+        { prop: "id", label: "设备ID", type: "text", required: true },
+        { prop: "name", label: "设备名称", type: "text", required: true },
+        { prop: "template", label: "设备母版", type: "text" },
+      ],
+    },
+    style: { width: "100%" },
+  }),
+});
+
+registerPageComponent({
   type: "table",
-  label: "表格",
+  label: "静态表格",
   icon: "Grid",
   category: "data",
   canChildren: false,

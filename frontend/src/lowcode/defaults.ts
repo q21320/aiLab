@@ -133,7 +133,7 @@ export function defaultFormSchema(): FormSchema {
     labelWidth: 100,
     fieldSpan: 12,
     submitText: "提交",
-    submitApi: "/api/forms/employee/save",
+    submitApi: "/api/forms/employee/submit",
     fields: [
       {
         id: uid("f"),

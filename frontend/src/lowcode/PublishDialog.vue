@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { ElMessage } from "element-plus";
 import { Promotion } from "@element-plus/icons-vue";
 import { usePublishStore, type PublishedApp, type PublishKind } from "./publish";
 
@@ -18,6 +19,7 @@ const emit = defineEmits<{
 const store = usePublishStore();
 const name = ref("");
 const menu = ref(false);
+const saving = ref(false);
 
 watch(
   () => props.modelValue,
@@ -25,17 +27,33 @@ watch(
     if (v) {
       name.value = props.defaultName || "未命名应用";
       menu.value = false;
+      saving.value = false;
     }
   }
 );
 
-function confirm() {
-  const app = store.publish(props.kind, props.schema, {
-    name: name.value.trim() || "未命名应用",
-    menu: menu.value,
-  });
-  emit("update:modelValue", false);
-  emit("published", app);
+async function confirm() {
+  saving.value = true;
+  try {
+    const { app, synced, error } = await store.publish(props.kind, props.schema, {
+      name: name.value.trim() || "未命名应用",
+      menu: menu.value,
+    });
+    emit("update:modelValue", false);
+    emit("published", app);
+    if (synced) {
+      ElMessage.success(`已发布「${app.name}」并同步到后端`);
+    } else {
+      ElMessage({
+        type: "warning",
+        duration: 8000,
+        showClose: true,
+        message: `已发布「${app.name}」（保存在浏览器本地），但同步后端失败：${error}`,
+      });
+    }
+  } finally {
+    saving.value = false;
+  }
 }
 </script>
 
@@ -60,7 +78,7 @@ function confirm() {
     </div>
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" :icon="Promotion" @click="confirm">发布</el-button>
+      <el-button type="primary" :icon="Promotion" :loading="saving" @click="confirm">发布</el-button>
     </template>
   </el-dialog>
 </template>

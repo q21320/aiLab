@@ -5,20 +5,13 @@ import { useUserStore } from "../stores/user";
 import {
   Fold,
   Expand,
-  Odometer,
-  Grid,
-  Star,
-  UserFilled,
-  Setting,
   ArrowDown,
   Document,
   Tickets,
   Connection,
   DataAnalysis,
   Monitor,
-  Operation,
-  Box,
-  Notebook,
+  Menu as MenuIcon,
 } from "@element-plus/icons-vue";
 import {
   usePublishStore,
@@ -26,36 +19,35 @@ import {
   type PublishKind,
 } from "../lowcode/publish";
 import { ROLE_LABELS, type UserRole } from "../stores/user";
+import { useMenuStore, filterMenus, flattenMenus } from "../stores/menu";
+import SideMenu from "./SideMenu.vue";
 
 const route = useRoute();
 const router = useRouter();
 const userStore = useUserStore();
 const publishStore = usePublishStore();
+const menuStore = useMenuStore();
 
 onMounted(() => publishStore.init());
 
 const isCollapse = ref(false);
 
-// 当前高亮菜单跟随路由
-const activeMenu = computed(() => route.path);
+/** 当前角色可见的多级菜单 */
+const navMenus = computed(() => filterMenus(menuStore.items, userStore.role));
 
-// 侧边栏菜单项（按角色过滤，4.9 三级权限）
-const menus = [
-  { path: "/dashboard", title: "仪表盘", icon: Odometer, roles: [] as UserRole[] },
-  { path: "/lowcode", title: "低代码平台", icon: Grid, roles: ["admin"] as UserRole[] },
-  { path: "/apps", title: "应用中心", icon: Star, roles: [] as UserRole[] },
-  { path: "/production", title: "排产管理", icon: Operation, roles: ["admin", "operator"] as UserRole[] },
-  { path: "/samples", title: "样品管理", icon: Box, roles: ["admin", "operator"] as UserRole[] },
-  { path: "/logs", title: "操作日志", icon: Notebook, roles: ["admin"] as UserRole[] },
-  { path: "/user", title: "用户管理", icon: UserFilled, roles: ["admin"] as UserRole[] },
-  { path: "/setting", title: "系统设置", icon: Setting, roles: ["admin"] as UserRole[] },
-];
-const visibleMenus = computed(() => menus.filter((m) => (m.roles.length ? m.roles.includes(userStore.role) : true)));
+/** 当前高亮：优先匹配 fullPath（支持 /lowcode?tab=form 这类带参数的入口），其次匹配路径前缀 */
+const activeMenu = computed(() => {
+  const flat = flattenMenus(navMenus.value).filter((i) => i.path);
+  const exact = flat.find((i) => i.path === route.fullPath) || flat.find((i) => i.path === route.path);
+  if (exact) return exact.path;
+  const prefix = flat
+    .filter((i) => i.path !== "/" && route.path.startsWith(i.path))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  return prefix?.path || route.path;
+});
 
-// 已发布且「挂载菜单+启用」的应用，动态出现在左侧导航
-const menuApps = computed(() =>
-  publishStore.apps.filter((a) => a.menu && a.enable)
-);
+// 已发布且「挂载菜单+启用」的应用，动态出现在左侧导航（分组：我的应用）
+const menuApps = computed(() => publishStore.apps.filter((a) => a.menu && a.enable));
 const KIND_MENU_ICONS: Record<PublishKind, any> = {
   page: Document,
   form: Tickets,
@@ -71,6 +63,9 @@ function appMenuIndex(kind: PublishKind, id: string): string {
 }
 function roleLabel(role: string): string {
   return ROLE_LABELS[role as UserRole] || role;
+}
+function gotoMenuSetting() {
+  router.push("/menus");
 }
 
 // 顶部用户下拉菜单
@@ -100,20 +95,29 @@ function handleCommand(command: string) {
         active-text-color="#ffffff"
         class="menu"
       >
-        <el-menu-item v-for="m in visibleMenus" :key="m.path" :index="m.path">
-          <el-icon><component :is="m.icon" /></el-icon>
-          <template #title>{{ m.title }}</template>
-        </el-menu-item>
-        <!-- 已挂载的低代码应用（应用中心开启「挂载菜单」后出现） -->
-        <el-menu-item
-          v-for="a in menuApps"
-          :key="a.kind + a.id"
-          :index="appMenuIndex(a.kind, a.id)"
-        >
-          <el-icon><component :is="appMenuIcon(a.kind)" /></el-icon>
-          <template #title>{{ a.name }}</template>
-        </el-menu-item>
+        <!-- 多级导航（由「系统管理 → 导航菜单」配置，支持任意层级） -->
+        <SideMenu :items="navMenus" :role="userStore.role" />
+
+        <!-- 已发布并挂载菜单的低代码应用 -->
+        <el-sub-menu v-if="menuApps.length" index="mounted-apps">
+          <template #title>
+            <el-icon><MenuIcon /></el-icon>
+            <span>我的应用</span>
+          </template>
+          <el-menu-item
+            v-for="a in menuApps"
+            :key="a.kind + a.id"
+            :index="appMenuIndex(a.kind, a.id)"
+          >
+            <el-icon><component :is="appMenuIcon(a.kind)" /></el-icon>
+            <template #title>{{ a.name }}</template>
+          </el-menu-item>
+        </el-sub-menu>
       </el-menu>
+      <!-- 调整导航入口（管理员） -->
+      <div v-if="userStore.role === 'admin' && !isCollapse" class="menu-config-entry" @click="gotoMenuSetting">
+        <el-icon><MenuIcon /></el-icon> 调整导航
+      </div>
     </el-aside>
 
     <el-container>
@@ -167,6 +171,8 @@ function handleCommand(command: string) {
   background-color: #001529;
   transition: width 0.28s;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .logo {
   height: 60px;
@@ -178,9 +184,41 @@ function handleCommand(command: string) {
   background-color: #002140;
   white-space: nowrap;
   overflow: hidden;
+  flex-shrink: 0;
 }
 .menu {
   border-right: none;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* 深色主题下子菜单标题与弹出层配色 */
+.menu :deep(.el-sub-menu__title) {
+  color: #b7c0cd;
+}
+.menu :deep(.el-sub-menu__title:hover) {
+  background-color: #000c17;
+  color: #fff;
+}
+.menu :deep(.el-menu) {
+  background-color: #000c17;
+}
+.menu-config-entry {
+  flex-shrink: 0;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #b7c0cd;
+  background: #002140;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+.menu-config-entry:hover {
+  color: #fff;
+  background: #003366;
 }
 .header {
   display: flex;

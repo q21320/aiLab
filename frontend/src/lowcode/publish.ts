@@ -77,6 +77,8 @@ export const usePublishStore = defineStore("lowcode-publish", {
     loaded: false,
     /** null=未知；true=后端已连接；false=本地模式 */
     backendOnline: null as null | boolean,
+    /** 最近一次同步失败原因（界面直接展示，便于定位 404/未启动等问题） */
+    lastSyncError: "",
   }),
   getters: {
     count(state): number {
@@ -88,14 +90,16 @@ export const usePublishStore = defineStore("lowcode-publish", {
     async init() {
       if (this.loaded) return;
       this.loaded = true;
-      const serverApps = await fetchAppsFromServer();
-      if (serverApps) {
-        this.apps = serverApps;
+      const res = await fetchAppsFromServer();
+      if (res.ok && res.data) {
+        this.apps = res.data.map((a) => ({ ...a, schema: a.schema }));
         this.backendOnline = true;
+        this.lastSyncError = "";
         this.persistLocal();
       } else {
         this.apps = loadLocal();
         this.backendOnline = false;
+        this.lastSyncError = res.error || "后端接口不可用";
       }
     },
 
@@ -107,12 +111,12 @@ export const usePublishStore = defineStore("lowcode-publish", {
       }
     },
 
-    /** 发布（按 kind+id 幂等覆盖，重新设计发布即更新） */
-    publish(
+    /** 发布（按 kind+id 幂等覆盖，重新设计发布即更新）；返回是否已同步到后端 */
+    async publish(
       kind: PublishKind,
       schema: any,
       opts?: { name?: string; menu?: boolean }
-    ): PublishedApp {
+    ): Promise<{ app: PublishedApp; synced: boolean; error?: string }> {
       const id = (schema && schema.id) || `${kind}_${Date.now()}`;
       const exist = this.apps.find((a) => a.kind === kind && a.id === id);
       const now = Date.now();
@@ -130,29 +134,35 @@ export const usePublishStore = defineStore("lowcode-publish", {
       else this.apps.push(app);
       this.persistLocal();
       useAuditStore().log("应用", exist ? "重新发布" : "发布", `发布「${app.name}」（${kind}）${app.menu ? "，挂载到菜单" : ""}`);
-      postAppToServer(app).then((ok) => (this.backendOnline = ok));
-      return app;
+      const res = await postAppToServer(app);
+      this.backendOnline = res.ok;
+      this.lastSyncError = res.ok ? "" : res.error || "同步失败";
+      return { app, synced: res.ok, error: res.ok ? undefined : this.lastSyncError };
     },
 
     /** 切换启用 / 挂载菜单 */
-    toggle(kind: PublishKind, id: string, key: "enable" | "menu") {
+    async toggle(kind: PublishKind, id: string, key: "enable" | "menu") {
       const app = this.apps.find((a) => a.kind === kind && a.id === id);
       if (!app) return;
       app[key] = !app[key];
       this.persistLocal();
       useAuditStore().log("应用", key === "enable" ? (app.enable ? "启用" : "停用") : app.menu ? "挂载菜单" : "取消挂载", `「${app.name}」`);
-      putAppToServer(kind, id, { [key]: app[key] }).then((ok) => (this.backendOnline = ok));
+      const res = await putAppToServer(kind, id, { [key]: app[key] });
+      this.backendOnline = res.ok;
+      if (!res.ok) this.lastSyncError = res.error || "同步失败";
     },
 
     /** 卸载 */
-    unpublish(kind: PublishKind, id: string) {
+    async unpublish(kind: PublishKind, id: string) {
       const target = this.apps.find((a) => a.kind === kind && a.id === id);
       const before = this.apps.length;
       this.apps = this.apps.filter((a) => !(a.kind === kind && a.id === id));
       this.persistLocal();
       if (target) useAuditStore().log("应用", "卸载", `卸载「${target.name}」`);
       if (this.apps.length < before) {
-        deleteAppFromServer(kind, id).then((ok) => (this.backendOnline = ok));
+        const res = await deleteAppFromServer(kind, id);
+        this.backendOnline = res.ok;
+        if (!res.ok) this.lastSyncError = res.error || "同步失败";
       }
     },
   },

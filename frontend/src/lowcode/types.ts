@@ -25,7 +25,8 @@ export type NodeType =
   | "row"
   | "col"
   | "tag"
-  | "space";
+  | "space"
+  | "crudTable";
 
 /** 表格列定义 */
 export interface TableColumn {
@@ -80,6 +81,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   col: "列",
   tag: "标签",
   space: "间距",
+  crudTable: "数据表格",
 };
 
 /** 允许挂载子节点的容器类型 */

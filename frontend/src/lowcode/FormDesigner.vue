@@ -16,6 +16,7 @@ import { useLowcodeStore } from "./store";
 import { defaultFormSchema } from "./defaults";
 import PublishDialog from "./PublishDialog.vue";
 import type { PublishedApp } from "./publish";
+import { submitToCustomApi, submitToPlatform } from "../api/forms";
 import {
   FORM_FIELD_LABELS,
   FORM_FIELD_DEFAULT_OPTIONS,
@@ -278,12 +279,14 @@ const previewRules = computed<FormRules>(() => {
 });
 const previewFormRef = ref<FormInstance>();
 const submitted = ref("");
+const submittedId = ref("");
 function openPreview() {
   previewData.value = {};
   form.value.fields.forEach((f) => {
     previewData.value[f.name] = f.defaultValue ?? (f.type === "checkbox" ? [] : f.type === "switch" ? false : "");
   });
   submitted.value = "";
+  submittedId.value = "";
   previewVisible.value = true;
 }
 async function submitPreview() {
@@ -293,10 +296,15 @@ async function submitPreview() {
     return;
   }
   submitted.value = JSON.stringify(previewData.value, null, 2);
-  if (form.value.submitApi) {
-    ElMessage.success(`模拟提交到：${form.value.submitApi}`);
+  const custom = (form.value.submitApi || "").trim();
+  const res = custom
+    ? await submitToCustomApi(custom, previewData.value)
+    : await submitToPlatform(form.value.id, form.value.name, previewData.value);
+  if (res.ok) {
+    submittedId.value = res.id || "";
+    ElMessage.success(res.id ? `提交成功，提交编号 ${res.id}` : "提交成功");
   } else {
-    ElMessage.success("模拟提交成功（未配置提交 API）");
+    ElMessage.error(`提交失败：${res.error || "未知错误"}`);
   }
 }
 
@@ -636,7 +644,12 @@ function onPublished(app: PublishedApp) {
           </el-row>
         </el-form>
         <template v-if="submitted">
-          <el-divider>提交数据（未接后端，前端模拟）</el-divider>
+          <el-divider>
+            提交结果
+            <el-tag v-if="submittedId" size="small" type="success" effect="plain" style="margin-left: 8px">
+              提交编号 {{ submittedId }}
+            </el-tag>
+          </el-divider>
           <pre class="code-block">{{ submitted }}</pre>
         </template>
       </div>

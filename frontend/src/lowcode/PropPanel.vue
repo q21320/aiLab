@@ -80,6 +80,18 @@ const FIELD_DEFS: Record<string, FieldDef[]> = {
   table: [
     { key: "border", label: "显示边框", control: "switch" },
   ],
+  crudTable: [
+    { key: "resource", label: "数据源资源名", control: "text", placeholder: "devices（平台通用接口 /api/crud/devices）" },
+    { key: "api", label: "自有接口模板（可选）", control: "text", placeholder: "/api/xxx/list?page={page}&size={pageSize}&kw={keyword}" },
+    { key: "listPath", label: "响应列表路径", control: "text", placeholder: "data.records（默认 list）" },
+    { key: "totalPath", label: "响应总数路径", control: "text", placeholder: "data.total（默认 total）" },
+    { key: "pageSize", label: "每页条数", control: "number" },
+    { key: "searchPlaceholder", label: "搜索框提示", control: "text", placeholder: "搜索" },
+    { key: "searchable", label: "显示搜索", control: "switch" },
+    { key: "allowCreate", label: "允许新建", control: "switch" },
+    { key: "allowEdit", label: "允许编辑", control: "switch" },
+    { key: "allowDelete", label: "允许删除", control: "switch" },
+  ],
 };
 
 const typeLabel = computed(() =>
@@ -133,13 +145,24 @@ function fieldSet(f: FieldDef, v: any) {
   else delete props.node.props[f.key];
 }
 
-/** JSON 文本编辑（表格数据等） */
+/** JSON 文本编辑：静态表格编辑数据(data)，数据表格编辑表单字段(formFields) */
+const jsonKey = computed(() => (props.node?.type === "crudTable" ? "formFields" : "data"));
+const jsonLabel = computed(() => (props.node?.type === "crudTable" ? "表单字段 (JSON)" : "表格数据 (JSON)"));
+const jsonHint = computed(() =>
+  props.node?.type === "crudTable"
+    ? '[{"prop":"id","label":"设备ID","type":"text","required":true}]'
+    : '[{"字段": "值"}]'
+);
 const jsonText = ref("");
 const jsonError = ref(false);
 watch(
   () => props.node?.id,
   () => {
-    jsonText.value = props.node?.type === "table" ? JSON.stringify(props.node?.props?.data || [], null, 2) : "";
+    const t = props.node?.type;
+    jsonText.value =
+      t === "table" || t === "crudTable"
+        ? JSON.stringify(props.node?.props?.[t === "crudTable" ? "formFields" : "data"] || [], null, 2)
+        : "";
     jsonError.value = false;
   },
   { immediate: true }
@@ -149,16 +172,19 @@ function applyJson() {
   try {
     const v = JSON.parse(jsonText.value);
     props.node.props = props.node.props || {};
-    props.node.props.data = Array.isArray(v) ? v : [v];
+    props.node.props[jsonKey.value] = Array.isArray(v) ? v : [v];
     jsonError.value = false;
   } catch {
     jsonError.value = true;
   }
 }
 
-// 表格列编辑
+// 表格列编辑（静态表格 & 数据表格）
 const columns = computed({
-  get: () => (props.node?.type === "table" ? (props.node.props?.columns || []) : []) as any[],
+  get: () => {
+    const t = props.node?.type;
+    return (t === "table" || t === "crudTable" ? props.node?.props?.columns || [] : []) as any[];
+  },
   set: (v) => {
     if (!props.node) return;
     props.node.props = props.node.props || {};
@@ -288,8 +314,8 @@ const compTip = computed(() => getPageComponent(props.node?.type || ("" as any))
         />
       </div>
 
-      <!-- 表格：列管理 -->
-      <template v-if="node.type === 'table'">
+      <!-- 表格：列管理（静态表格 & 数据表格通用） -->
+      <template v-if="node.type === 'table' || node.type === 'crudTable'">
         <el-divider class="divider">表格列</el-divider>
         <div v-for="(col, i) in columns" :key="i" class="col-row">
           <el-input v-model="col.label" size="small" placeholder="列名" style="width: 90px" />
@@ -299,18 +325,21 @@ const compTip = computed(() => getPageComponent(props.node?.type || ("" as any))
         </div>
         <el-button size="small" style="width: 100%" @click="addColumn">+ 添加列</el-button>
 
-        <el-divider class="divider">表格数据 (JSON)</el-divider>
+        <el-divider class="divider">{{ jsonLabel }}</el-divider>
         <el-input
           v-model="jsonText"
           type="textarea"
           :rows="8"
           spellcheck="false"
           :class="{ 'json-error': jsonError }"
-          placeholder='[{"字段": "值"}]'
+          :placeholder="jsonHint"
         />
         <el-button size="small" type="primary" style="width: 100%; margin-top: 6px" @click="applyJson">
-          应用数据
+          应用
         </el-button>
+        <p v-if="node.type === 'crudTable'" class="hint">
+          数据表格运行时自动对接数据源；此处配置的是「新建/编辑」弹窗的字段（prop 对应接口字段）。
+        </p>
       </template>
 
       <!-- 通用样式 -->
