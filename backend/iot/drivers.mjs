@@ -476,7 +476,10 @@ export function listDrivers() {
 }
 
 export function getDriver(protocol) {
-  const d = DRIVERS[protocol];
+  // 防御：早期数据可能缺少 protocol 字段，按 mock 处理而不是直接抛错。
+  // （抛出会导致「探测/读取/下发」全部不可用，且错误信息对用户无意义）
+  const key = protocol || "mock";
+  const d = DRIVERS[key];
   if (!d) throw new Error(`不支持的协议：${protocol}（可选：${Object.keys(DRIVERS).join(" / ")}）`);
   return d;
 }

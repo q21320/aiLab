@@ -284,10 +284,26 @@ interface WriteOutcome {
 const writeOutcome = ref<WriteOutcome | null>(null);
 const writeError = ref("");
 
+/** 是否有可写点位（模拟设备、未配置 command/register 的设备不可下发） */
+function canWrite(device: IotDevice): boolean {
+  if (device.protocol === "mock" || !device.protocol) return false;
+  return (device.points || []).some((p) => p.command || p.register !== undefined);
+}
+
 async function openWrite(device: IotDevice) {
+  const points = (device.points || []).filter((p) => p.command || p.register !== undefined);
+  if (!points.length) {
+    // 模拟设备与未配置可写点位的设备：明确告知原因，而不是打开必然报错的弹窗
+    if (device.protocol === "mock" || !device.protocol) {
+      ElMessage.info(`「${device.name}」是平台模拟设备，数据由内置模拟器生成，不支持下发控制`);
+    } else {
+      ElMessage.warning(`「${device.name}」未配置可写点位（需在点位表中填写 command 或 register）`);
+    }
+    return;
+  }
   writeDevice.value = device;
-  writeDevicePoints.value = (device.points || []).filter((p) => p.command || p.register !== undefined);
-  writeForm.value = { deviceId: device.id, key: writeDevicePoints.value[0]?.key || "", value: 30 };
+  writeDevicePoints.value = points;
+  writeForm.value = { deviceId: device.id, key: points[0]?.key || "", value: 30 };
   writeOutcome.value = null;
   writeError.value = "";
   writeVisible.value = true;
@@ -375,8 +391,13 @@ async function openChart(device: IotDevice, focusTime?: number) {
   chartDevice.value = device;
   chartKey.value = (device.points || [])[0]?.key || "temperature";
   chartFocusTime.value = Number(focusTime) || 0;
-  // 带焦点时间时默认切到 1 小时历史窗口，便于看到告警前后趋势
-  chartRange.value = chartFocusTime.value ? 60 : 0;
+  // 修复：原先无条件重置 chartRange，导致点击「1 小时/24 小时」后被立刻改回「实时」，
+  // 表现为"点了没反应"。现在只在从外部跳转（带 focusTime）或首次打开时初始化。
+  if (chartFocusTime.value) {
+    chartRange.value = 60; // 告警跳转：默认定到 1 小时窗口
+  } else if (!chartVisible.value) {
+    chartRange.value = 0; // 首次打开：默认实时
+  }
   chartVisible.value = true;
   await new Promise((r) => setTimeout(r, 60));
   renderChart();
@@ -386,6 +407,15 @@ async function openChart(device: IotDevice, focusTime?: number) {
 }
 /** 曲线时间范围（分钟）：0 表示实时（内存缓冲），>0 表示查数据库历史 */
 const chartRange = ref<number>(0);
+
+/** 切换时间范围：清掉告警定位焦点，重建定时器并重绘 */
+async function onRangeChange() {
+  chartFocusTime.value = 0;
+  clearInterval(pollTimer);
+  await renderChart();
+  // 实时模式 2 秒刷新；历史模式不自动刷新
+  if (!chartRange.value) pollTimer = window.setInterval(renderChart, 2000);
+}
 
 async function renderChart() {
   if (!chartVisible.value || !chartDevice.value || !chartEl.value) return;
@@ -547,7 +577,14 @@ function statusTag(s: string) {
           <template #default="{ row }">
             <el-button size="small" :icon="Connection" @click="doProbe(row)">探测</el-button>
             <el-button size="small" :icon="Search" @click="doRead(row)">读取</el-button>
-            <el-button size="small" :icon="Setting" @click="openWrite(row)">下发</el-button>
+            <el-tooltip
+              :content="canWrite(row) ? '向设备下发控制指令' : '该设备无可用写点位（模拟设备不支持下发）'"
+              placement="top"
+            >
+              <span>
+                <el-button size="small" :icon="Setting" :disabled="!canWrite(row)" @click="openWrite(row)">下发</el-button>
+              </span>
+            </el-tooltip>
             <el-button size="small" type="primary" :icon="Connection" @click="openChart(row)">曲线</el-button>
             <el-button size="small" text type="danger" :icon="Delete" @click="removeDeviceRow(row)">删除</el-button>
           </template>
@@ -732,7 +769,7 @@ function statusTag(s: string) {
     <el-dialog v-model="chartVisible" :title="`实时曲线 · ${chartDevice?.name || ''}`" width="860px" @close="closeChart">
       <div class="chart-toolbar">
         <span class="range-label">时间范围：</span>
-        <el-radio-group v-model="chartRange" size="small" @change="openChart(chartDevice!)">
+        <el-radio-group v-model="chartRange" size="small" @change="onRangeChange">
           <el-radio-button :value="0">实时</el-radio-button>
           <el-radio-button :value="10">10 分钟</el-radio-button>
           <el-radio-button :value="60">1 小时</el-radio-button>

@@ -367,12 +367,12 @@ let iotPersistChain = Promise.resolve();
 if (!iotState || !Array.isArray(iotState.devices)) {
   iotState = {
     devices: [
-      { id: "DEV-001", name: "高低温试验箱", type: "env", location: "实验室A-101", status: "online", baseTemp: 35.2, baseHum: 60, power: 12.4, limits: { temperature: { max: 45, warn: 40 }, humidity: { max: 85, warn: 75 } } },
-      { id: "DEV-002", name: "恒温恒湿箱", type: "env", location: "实验室A-102", status: "online", baseTemp: 28.0, baseHum: 55, power: 9.8, limits: { temperature: { max: 38, warn: 34 }, humidity: { max: 80, warn: 70 } } },
-      { id: "DEV-003", name: "万能材料试验机", type: "test", location: "实验室B-201", status: "online", baseTemp: 24.5, baseHum: 45, power: 15.2, limits: { temperature: { max: 30, warn: 28 } } },
-      { id: "DEV-004", name: "三坐标测量仪", type: "test", location: "实验室B-202", status: "offline", baseTemp: 23.0, baseHum: 50, power: 0, limits: { temperature: { max: 30, warn: 28 } } },
-      { id: "DEV-005", name: "厂区总能耗表", type: "energy", location: "配电房", status: "online", baseTemp: 30.0, baseHum: 50, power: 42.6, limits: { power: { max: 60, warn: 50 } } },
-      { id: "DEV-006", name: "3号试验箱", type: "env", location: "实验室A-103", status: "error", baseTemp: 42.1, baseHum: 70, power: 18.4, limits: { temperature: { max: 45, warn: 40 }, humidity: { max: 85, warn: 75 } } },
+      { id: "DEV-001", name: "高低温试验箱", type: "env", location: "实验室A-101", status: "online", protocol: "mock", baseTemp: 35.2, baseHum: 60, power: 12.4, limits: { temperature: { max: 45, warn: 40 }, humidity: { max: 85, warn: 75 } } },
+      { id: "DEV-002", name: "恒温恒湿箱", type: "env", location: "实验室A-102", status: "online", protocol: "mock", baseTemp: 28.0, baseHum: 55, power: 9.8, limits: { temperature: { max: 38, warn: 34 }, humidity: { max: 80, warn: 70 } } },
+      { id: "DEV-003", name: "万能材料试验机", type: "test", location: "实验室B-201", status: "online", protocol: "mock", baseTemp: 24.5, baseHum: 45, power: 15.2, limits: { temperature: { max: 30, warn: 28 } } },
+      { id: "DEV-004", name: "三坐标测量仪", type: "test", location: "实验室B-202", status: "offline", protocol: "mock", baseTemp: 23.0, baseHum: 50, power: 0, limits: { temperature: { max: 30, warn: 28 } } },
+      { id: "DEV-005", name: "厂区总能耗表", type: "energy", location: "配电房", status: "online", protocol: "mock", baseTemp: 30.0, baseHum: 50, power: 42.6, limits: { power: { max: 60, warn: 50 } } },
+      { id: "DEV-006", name: "3号试验箱", type: "env", location: "实验室A-103", status: "error", protocol: "mock", baseTemp: 42.1, baseHum: 70, power: 18.4, limits: { temperature: { max: 45, warn: 40 }, humidity: { max: 85, warn: 75 } } },
     ],
     alerts: [
       { id: "AL-0001", deviceId: "DEV-006", level: "error", message: "3号试验箱 温度 42.1℃ 超过预警值 40℃", time: Date.now() - 60000, status: "open" },
@@ -380,6 +380,20 @@ if (!iotState || !Array.isArray(iotState.devices)) {
     serial: 100,
     tick: 0,
   };
+}
+
+// 数据修复：早期版本的种子设备没有 protocol 字段，导致驱动层 getDriver(undefined) 报错，
+// 表现为「探测/读取/下发」全部失败。这里在启动时统一补为 mock（模拟设备）。
+let fixedProtocol = 0;
+for (const d of iotState.devices || []) {
+  if (!d.protocol) {
+    d.protocol = "mock";
+    fixedProtocol += 1;
+  }
+}
+if (fixedProtocol) {
+  console.log(`[db] 已为 ${fixedProtocol} 台存量设备补全 protocol=mock`);
+  await writeJsonQuiet("iot", iotState);
 }
 
 // 告警：以数据库为准
@@ -560,6 +574,12 @@ async function simulateTick() {
     const point = computePoint(d.id);
     if (!point) continue;
     pushHistory(d, point);
+    // 修复：模拟采集此前只写历史，不回写设备当前值（真实设备路径有 onRealPoint 回写），
+    // 导致 device.temperature/humidity 永远是 undefined，设备列表与读取接口拿不到当前值。
+    for (const key of ["temperature", "humidity", "power"]) {
+      if (typeof point[key] === "number" && Number.isFinite(point[key])) d[key] = point[key];
+    }
+    d.lastUpdate = Date.now();
     points.push({ deviceId: d.id, deviceName: d.name, type: d.type, ...point });
     if (await registerAlert(d, point)) await writeJsonQuiet("iot", iotState);
   }

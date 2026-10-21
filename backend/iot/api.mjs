@@ -203,7 +203,21 @@ export function createIotExtraRoutes(deps) {
       const device = findDevice(decodeURIComponent(readMatch[1]));
       if (!device) return sendJSON(res, 404, { error: "设备不存在" }), true;
       try {
-        const result = await readDevice(device, { latestPoints: latestPointsOf(device.id) });
+        let result = await readDevice(device, { latestPoints: latestPointsOf(device.id) });
+        // 模拟设备通常没有点位表，mock 驱动会返回空对象 → 界面看起来"读取成功但没数据"。
+        // 这里用设备当前值（模拟器实时更新的 temperature/humidity/power）补全，便于演示。
+        if ((!result?.values || !Object.keys(result.values).length) && (device.protocol === "mock" || !device.protocol)) {
+          const synthetic = {};
+          for (const [k, label, unit] of [
+            ["temperature", "温度", "℃"],
+            ["humidity", "湿度", "%"],
+            ["power", "功率", "kW"],
+          ]) {
+            const v = device[k];
+            if (typeof v === "number") synthetic[k] = { label, value: v, raw: v, unit };
+          }
+          if (Object.keys(synthetic).length) result = { ...result, ok: true, values: synthetic };
+        }
         const now = Date.now();
         device.lastRead = { time: now, values: result.values };
         // 手动「读取」与自动测试采集走同一条链路：回写设备当前值 + 历史曲线 + 阈值告警 + SSE 推送。
