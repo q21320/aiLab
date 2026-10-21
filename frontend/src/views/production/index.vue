@@ -5,6 +5,7 @@ import { Plus, VideoPlay, Warning, Delete, RefreshRight, Download } from "@eleme
 import { useProductionStore, type ProductionOrder, type WorkOrder } from "../../stores/production";
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
 import GanttBoard from "./GanttBoard.vue";
+import LoadAnalysis from "./LoadAnalysis.vue";
 
 startIotLive();
 const store = useProductionStore();
@@ -12,7 +13,7 @@ const store = useProductionStore();
 onMounted(() => {
   void store.loadFromServer();
 });
-const tab = ref<"orders" | "gantt" | "wos" | "exceptions" | "process">("gantt");
+const tab = ref<"orders" | "gantt" | "wos" | "exceptions" | "process" | "load">("gantt");
 
 // ---------------------------------------------------------------------------
 // 订单
@@ -421,6 +422,7 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
         <el-tab-pane label="工单与进度" name="wos" />
         <el-tab-pane label="异常管理" name="exceptions" />
         <el-tab-pane label="工序与产能" name="process" />
+        <el-tab-pane label="产能负荷" name="load" />
       </el-tabs>
       <div class="iot-badge" :class="{ on: iotBadge.connected }">
         物联网：在线设备 {{ iotBadge.online }} 台 · 未处理告警 {{ iotBadge.alerts }} 条
@@ -544,6 +546,11 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
     </template>
 
     <!-- 异常管理 -->
+    <!-- 产能负荷 -->
+    <template v-else-if="tab === 'load'">
+      <LoadAnalysis :lines="store.lines" :work-orders="store.workOrders" :days="7" />
+    </template>
+
     <template v-else-if="tab === 'exceptions'">
       <div class="toolbar">
         <el-button type="primary" :icon="Plus" @click="openExDialog()">上报异常</el-button>
