@@ -14,6 +14,7 @@ import {
   type AutoTestRun,
   type AutoTestStep,
 } from "../../api/autotest";
+import { addDevice, startSimulator } from "../../api/iot";
 import type { IotDevice } from "../../api/iot";
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
 import { useSampleStore } from "../../stores/samples";
@@ -103,6 +104,91 @@ function writeSampleRecord(conclusion: string) {
 // ---------------------------------------------------------------------------
 // 执行
 // ---------------------------------------------------------------------------
+/**
+ * 运行前置校验：设备是否具备方案所需的点位。
+ * 原先不做校验，模拟设备/未配点位的设备运行后必然 failed，
+ * 用户只看到"一个都不能用"却不知道原因。
+ */
+function checkDeviceReady(): string {
+  const dev = devices.value.find((d) => d.id === selectedDeviceId.value);
+  if (!dev) return "请选择要测试的设备";
+  const isMock = !dev.protocol || dev.protocol === "mock";
+  if (isMock) {
+    return `「${dev.name}」是平台模拟设备，无法执行自动化测试。请先在「设备接入」中接入真实设备（或启动虚拟仪器后接入 SCPI/Modbus 设备），并配置点位表。`;
+  }
+  const points = dev.points || [];
+  if (!points.length) {
+    return `「${dev.name}」尚未配置点位表，无法执行测试。请到「设备接入」为该设备配置 query/command 点位。`;
+  }
+  // 按方案步骤检查点位是否齐全
+  const needed = new Set<string>();
+  for (const step of selectedPlan.value?.steps || []) {
+    if ((step.type === "write" || step.type === "collect" || step.type === "judge") && step.key) needed.add(step.key);
+  }
+  const byKey = new Map(points.map((p) => [p.key, p]));
+  const missing: string[] = [];
+  for (const step of selectedPlan.value?.steps || []) {
+    if (step.type === "write") {
+      const k = String(step.key || "");
+      const p = byKey.get(k);
+      if (!p) missing.push(`写点位 ${k}`);
+      else if (!p.command && p.register === undefined) missing.push(`写点位 ${k}（缺少 command）`);
+    } else if (step.type === "collect") {
+      const k = String(step.key || "");
+      const p = byKey.get(k);
+      if (!p) missing.push(`采集点位 ${k}`);
+      else if (!p.query && p.register === undefined) missing.push(`采集点位 ${k}（缺少 query）`);
+    }
+  }
+  if (missing.length) {
+    return `设备「${dev.name}」缺少方案所需点位：${[...new Set(missing)].join("、")}。请到「设备接入」补充后再试。`;
+  }
+  return "";
+}
+
+/** 是否存在可执行测试的设备（真实协议 + 有点位） */
+const hasTestableDevice = computed(() =>
+  devices.value.some((d) => d.protocol && d.protocol !== "mock" && (d.points || []).length > 0),
+);
+
+const preparing = ref(false);
+
+/**
+ * 一键准备可测设备：启动虚拟仪器 → 接入一台带完整点位的 SCPI 设备。
+ * 让"想试一下自动化测试"的用户不用先去别的页面配置设备。
+ */
+async function prepareVirtualDevice() {
+  preparing.value = true;
+  try {
+    await startSimulator();
+    await new Promise((r) => setTimeout(r, 800));
+    const res = await addDevice({
+      name: "虚拟试验箱 VC-300（自动测试）",
+      type: "test",
+      protocol: "scpi",
+      address: { host: "127.0.0.1", port: 5025 },
+      points: [
+        { key: "setpoint", label: "设定温度", unit: "℃", command: "SOUR:TEMP {value}" },
+        { key: "temperature", label: "实测温度", unit: "℃", query: "MEAS:TEMP?" },
+        { key: "humidity", label: "湿度", unit: "%", query: "MEAS:HUMI?" },
+        { key: "power", label: "功率", unit: "kW", query: "MEAS:POW?" },
+      ],
+      pollIntervalMs: 5000,
+    } as any);
+    if (res?.device) {
+      ElMessage.success(`已准备设备「${res.device.name}」，可直接运行测试`);
+      await loadAll();
+      selectedDeviceId.value = res.device.id;
+    } else {
+      ElMessage.error((res as any)?.error || "准备失败，请检查设备配置");
+    }
+  } catch (e: any) {
+    ElMessage.error(`准备失败：${e?.message || e}`);
+  } finally {
+    preparing.value = false;
+  }
+}
+
 async function startTest() {
   if (!selectedPlan.value) {
     ElMessage.warning("请先选择测试方案");
@@ -110,6 +196,12 @@ async function startTest() {
   }
   if (!selectedDeviceId.value) {
     ElMessage.warning("请选择要测试的设备（可先在「设备接入」中添加真实设备）");
+    return;
+  }
+  // 运行前校验，避免"启动了才发现必然失败"
+  const problem = checkDeviceReady();
+  if (problem) {
+    ElMessageBox.alert(problem, "无法执行测试", { type: "warning", confirmButtonText: "知道了" }).catch(() => {});
     return;
   }
   const res = await runPlan(selectedPlan.value.id, selectedDeviceId.value, selectedSampleId.value);
@@ -279,9 +371,17 @@ function openReport(id: string) {
         <el-select v-model="selectedPlanId" placeholder="选择测试方案" style="width: 240px">
           <el-option v-for="p in plans" :key="p.id" :label="p.name" :value="p.id" />
         </el-select>
-        <el-select v-model="selectedDeviceId" placeholder="选择被测设备" style="width: 240px">
-          <el-option v-for="d in devices" :key="d.id" :label="`${d.name}（${d.protocol || 'mock'}）`" :value="d.id" />
+        <el-select v-model="selectedDeviceId" placeholder="选择被测设备" style="width: 280px">
+          <el-option
+            v-for="d in devices"
+            :key="d.id"
+            :label="`${d.name}（${d.protocol || 'mock'}）${!d.protocol || d.protocol === 'mock' ? ' · 不支持测试' : (d.points || []).length ? '' : ' · 缺点位'}`"
+            :value="d.id"
+          />
         </el-select>
+        <el-button v-if="!hasTestableDevice" type="warning" plain @click="prepareVirtualDevice" :loading="preparing">
+          一键准备可测设备
+        </el-button>
         <el-select v-model="selectedSampleId" placeholder="关联样品（可选）" clearable style="width: 220px">
           <el-option
             v-for="s in testableSamples"
