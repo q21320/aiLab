@@ -35,6 +35,7 @@ import { createIotExtraRoutes } from "./iot/api.mjs";
 import { createFormRoutes } from "./forms.mjs";
 import { createCrudRoutes } from "./crud.mjs";
 import { createAuditRoutes } from "./audit.mjs";
+import { createProductionRoutes } from "./production.mjs";
 import { createAiRoutes } from "./ai.mjs";
 import { createPoller } from "./iot/poller.mjs";
 import { readDevice } from "./iot/drivers.mjs";
@@ -840,6 +841,17 @@ const crudRoutes = createCrudRoutes({ sendJSON, readBody, db, database: db });
   if (Object.keys(hydrated).length) crudRoutes.hydrate(hydrated);
 }
 
+// 排产模块（订单/工序/产线/工单/异常）· 存储：PostgreSQL kv_documents.production
+const productionRoutes = createProductionRoutes({
+  sendJSON,
+  readBody,
+  db,
+  audit: async (req2, entry) => {
+    const actor = await auth.getSession(req2);
+    await auditRoutes.log(entry, actor ? { name: actor.name, role: actor.role } : null);
+  },
+});
+
 // 操作日志（审计）· 存储：PostgreSQL audit_logs 表（索引 + 数据库内分页）
 const auditRoutes = createAuditRoutes({
   sendJSON,
@@ -971,6 +983,9 @@ async function handle(req, res) {
 
   // 操作日志（审计）
   if (await auditRoutes(req, res, path, method)) return;
+
+  // 排产模块
+  if (await productionRoutes(req, res, path, method)) return;
 
   // ---------------- 低代码应用 ----------------
   if (method === "GET" && path === "/api/lowcode/apps") {
@@ -1233,17 +1248,21 @@ async function handle(req, res) {
 
   // ---------------- 备份与恢复（4.8 数据存储/备份） ----------------
   if (method === "GET" && path === "/api/backup") {
+    // 全量导出：含 IoT 状态与排产数据（此前排产只在浏览器 localStorage，不会进备份）
     return sendJSON(res, 200, {
       exportedAt: Date.now(),
+      storage: "PostgreSQL",
       apps,
       iot: iotState,
+      production: await readJson("production", null),
     });
   }
   if (method === "POST" && path === "/api/backup/snapshot") {
     try {
       mkdirSync(BACKUP_DIR, { recursive: true });
       const name = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-      writeFileSync(join(BACKUP_DIR, name), JSON.stringify({ apps, iot: iotState }, null, 2), "utf-8");
+      const prodForSnapshot = await readJson("production", null);
+      writeFileSync(join(BACKUP_DIR, name), JSON.stringify({ apps, iot: iotState, production: prodForSnapshot }, null, 2), "utf-8");
       // 保留策略：超过 20 个时删除**最旧**的快照（按 mtime 排序 + unlink）。
       // 原实现按字典序取 files[0] 并把内容写成空字符串 —— 既删错文件又会清空既有快照。
       pruneBackups(MAX_BACKUPS);
@@ -1269,6 +1288,7 @@ async function handle(req, res) {
       iotState = data.iot;
       await writeJson("apps", apps);
       await writeJson("iot", iotState);
+      if (data.production) await writeJson("production", data.production);
       // 恢复表单提交与 CRUD（事务内完成，失败整体回滚）
       await db.transaction(async (client) => {
         if (Array.isArray(data.formSubmissions)) {

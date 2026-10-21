@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, VideoPlay, Warning, Delete, RefreshRight } from "@element-plus/icons-vue";
 import { useProductionStore, type ProductionOrder } from "../../stores/production";
@@ -8,6 +8,10 @@ import GanttBoard from "./GanttBoard.vue";
 
 startIotLive();
 const store = useProductionStore();
+// 从后端加载排产数据（此前只存在 localStorage，换设备会丢）
+onMounted(() => {
+  void store.loadFromServer();
+});
 const tab = ref<"orders" | "gantt" | "wos" | "exceptions" | "process">("gantt");
 
 // ---------------------------------------------------------------------------
@@ -208,6 +212,13 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
   <div class="production">
     <!-- 顶部：页签 + 物联网状态（4.7 数据互通） -->
     <div class="prod-header">
+      <div class="sync-badge">
+        <el-tag v-if="store.backendOnline === true" type="success" size="small" effect="plain">已同步到数据库</el-tag>
+        <el-tag v-else-if="store.backendOnline === false" type="warning" size="small" effect="plain">
+          仅本地保存（{{ store.lastSyncError || "后端不可达" }}）
+        </el-tag>
+        <el-tag v-else type="info" size="small" effect="plain">加载中…</el-tag>
+      </div>
       <el-tabs v-model="tab" class="prod-tabs">
         <el-tab-pane label="订单管理" name="orders" />
         <el-tab-pane label="排产看板" name="gantt" />
@@ -523,6 +534,11 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
 </template>
 
 <style scoped>
+.sync-badge {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -8px;
+}
 .proc-tip {
   margin: 8px 0 0;
   font-size: 12px;

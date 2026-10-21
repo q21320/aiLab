@@ -5,6 +5,7 @@
 
 import { defineStore } from "pinia";
 import { useAuditStore } from "./audit";
+import { apiUrl } from "../api/base";
 import { advanceHours, estimateDurationHours, evaluateDue, nextWorkingTime } from "./scheduling";
 
 export type OrderStatus = "draft" | "scheduled" | "producing" | "done";
@@ -71,6 +72,8 @@ export interface ExceptionRecord {
 }
 
 const LS_KEY = "ailab.production.v1";
+/** 后端同步防抖定时器 */
+let syncTimer: ReturnType<typeof setTimeout> | undefined;
 
 function load<T>(fallback: T): T {
   try {
@@ -215,6 +218,12 @@ export const useProductionStore = defineStore("production", {
       lines: saved?.lines ?? seedLines(),
       workOrders: saved?.workOrders ?? seedWorkOrders(seedLines(), seedProcesses()),
       exceptions: saved?.exceptions ?? seedExceptions(seedOrders().map((o) => o.id)),
+      /** 后端是否可用（false 时仅本地持久化） */
+      backendOnline: null as null | boolean,
+      /** 是否已完成从后端加载 */
+      loaded: false,
+      /** 最近一次同步错误 */
+      lastSyncError: "",
     };
   },
   getters: {
@@ -229,7 +238,101 @@ export const useProductionStore = defineStore("production", {
     },
   },
   actions: {
+    /**
+     * 持久化：本地 localStorage + 后端 PostgreSQL 双写。
+     *
+     * 策略：
+     *   · 本地写入同步完成，保证操作立即生效、离线可用
+     *   · 后端异步推送，失败不影响本地操作，只记录 lastSyncError
+     *   · 多次变更做 300ms 防抖，避免拖动甘特图时高频请求
+     */
     persist() {
+      const snapshot = {
+        orders: this.orders,
+        processes: this.processes,
+        lines: this.lines,
+        workOrders: this.workOrders,
+        exceptions: this.exceptions,
+      };
+      save(snapshot); // 本地立即保存
+      // 后端异步同步（防抖）
+      clearTimeout(syncTimer);
+      syncTimer = setTimeout(() => {
+        void this.pushToServer();
+      }, 300);
+    },
+
+    /** 推送当前状态到后端 */
+    async pushToServer() {
+      try {
+        const res = await fetch(apiUrl("/api/production"), {
+          method: "PUT",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            state: {
+              orders: this.orders,
+              processes: this.processes,
+              lines: this.lines,
+              workOrders: this.workOrders,
+              exceptions: this.exceptions,
+            },
+          }),
+        });
+        this.backendOnline = res.ok;
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          this.lastSyncError = body?.error || `同步失败（${res.status}）`;
+        } else {
+          this.lastSyncError = "";
+        }
+      } catch {
+        this.backendOnline = false;
+        this.lastSyncError = "无法连接后端，数据暂存在本地";
+      }
+    },
+
+    /**
+     * 从后端加载排产数据。
+     * · 后端有数据 → 覆盖本地
+     * · 后端为空 → 把本地（含种子数据）推到后端完成初始化
+     * · 后端不可达 → 保持本地数据，标记 offline
+     */
+    async loadFromServer() {
+      try {
+        const res = await fetch(apiUrl("/api/production"), { credentials: "include" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          this.backendOnline = false;
+          this.lastSyncError = body?.error || `加载失败（${res.status}）`;
+          return false;
+        }
+        this.backendOnline = true;
+        const st = body?.state;
+        if (st && Array.isArray(st.orders)) {
+          this.orders = st.orders;
+          this.processes = st.processes?.length ? st.processes : this.processes;
+          this.lines = st.lines?.length ? st.lines : this.lines;
+          this.workOrders = st.workOrders || [];
+          this.exceptions = st.exceptions || [];
+          // 回写本地缓存，保证离线时也能看到后端数据
+          this.persistLocalOnly();
+        } else {
+          // 后端为空：上传本地种子数据，完成初始化
+          await this.pushToServer();
+        }
+        return true;
+      } catch {
+        this.backendOnline = false;
+        this.lastSyncError = "无法连接后端，使用本地数据";
+        return false;
+      } finally {
+        this.loaded = true;
+      }
+    },
+
+    /** 仅写本地（不触发后端同步），用于「从后端加载后回写缓存」 */
+    persistLocalOnly() {
       save({
         orders: this.orders,
         processes: this.processes,
