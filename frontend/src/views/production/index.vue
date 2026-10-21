@@ -44,13 +44,60 @@ const priorityLabel: Record<string, { text: string; type: string }> = {
 };
 
 function schedule(order: ProductionOrder) {
-  const ok = store.scheduleOrder(order.id);
-  if (ok) {
-    ElMessage.success(`订单 ${order.id} 已按工序+产能自动生成工单`);
-    tab.value = "gantt";
-  } else {
-    ElMessage.warning("订单已排产或排产窗口不足");
+  const r = store.scheduleOrder(order.id);
+  if (!r.ok) {
+    ElMessage.warning(r.reason || "排产失败");
+    return;
   }
+  if (r.late) {
+    ElMessageBox.alert(
+      `订单 ${order.id} 已排产，但预计**逾期 ${r.lateDays} 天**（交期 ${order.due}）。\n\n建议：` +
+        `\n· 提高相关工序产能或增加产线` +
+        `\n· 调整订单优先级或与客户协商交期`,
+      "⚠️ 交期预警",
+      { type: "warning", confirmButtonText: "查看排产" },
+    ).catch(() => {});
+  } else {
+    ElMessage.success(`订单 ${order.id} 已排产，可在交期内完成`);
+  }
+  tab.value = "gantt";
+}
+
+/** 一键自动排产：按优先级(高→低) + 交期(早→晚) 排序后依次排产 */
+function autoScheduleAll() {
+  const drafts = store.orders.filter((o) => o.status === "draft");
+  if (!drafts.length) {
+    ElMessage.info("没有待排产的订单");
+    return;
+  }
+  const priorityRank: Record<string, number> = { high: 0, normal: 1, low: 2 };
+  const sorted = [...drafts].sort((a, b) => {
+    const pr = (priorityRank[a.priority] ?? 1) - (priorityRank[b.priority] ?? 1);
+    if (pr !== 0) return pr;
+    return String(a.due).localeCompare(String(b.due));
+  });
+
+  let okCount = 0;
+  const lateOrders: string[] = [];
+  const failed: string[] = [];
+  for (const o of sorted) {
+    const r = store.scheduleOrder(o.id);
+    if (r.ok) {
+      okCount += 1;
+      if (r.late) lateOrders.push(`${o.id}（逾期 ${r.lateDays} 天）`);
+    } else {
+      failed.push(`${o.id}：${r.reason}`);
+    }
+  }
+
+  const lines = [`✅ 成功排产 ${okCount} 个订单（按优先级+交期排序）`];
+  if (lateOrders.length) lines.push(`\n⚠️ 以下订单将逾期：\n  ${lateOrders.join("\n  ")}`);
+  if (failed.length) lines.push(`\n❌ 以下订单排产失败：\n  ${failed.join("\n  ")}`);
+  ElMessageBox.alert(lines.join(""), "自动排产结果", {
+    type: lateOrders.length || failed.length ? "warning" : "success",
+    confirmButtonText: "查看排产看板",
+  }).catch(() => {});
+  tab.value = "gantt";
 }
 async function removeOrder(order: ProductionOrder) {
   try {
@@ -124,6 +171,22 @@ function saveLine() {
   ElMessage.success("产线已添加");
 }
 
+/** 订单排产结果：预计完成时间与是否逾期 */
+function orderPlan(order: ProductionOrder) {
+  const wos = store.workOrders.filter((w) => w.orderId === order.id);
+  if (!wos.length) return null;
+  const end = Math.max(...wos.map((w) => w.start + w.hours * 3600000));
+  const start = Math.min(...wos.map((w) => w.start));
+  const due = order.due ? new Date(`${order.due}T23:59:59`).getTime() : 0;
+  const late = due > 0 && end > due;
+  return {
+    start,
+    end,
+    late,
+    lateDays: late ? Math.ceil((end - due) / 86400000) : 0,
+  };
+}
+
 const iotBadge = computed(() => ({
   online: iotLive.overview?.online ?? 0,
   alerts: iotLive.overview?.openAlerts ?? 0,
@@ -168,6 +231,19 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
         <el-table-column prop="product" label="产品" min-width="160" />
         <el-table-column prop="qty" label="数量" width="100" />
         <el-table-column prop="due" label="交期" width="120" />
+        <el-table-column label="预计完成" width="170">
+          <template #default="{ row }">
+            <template v-if="orderPlan(row)">
+              <span :class="{ late: orderPlan(row)!.late }">
+                {{ new Date(orderPlan(row)!.end).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) }}
+              </span>
+              <el-tag v-if="orderPlan(row)!.late" type="danger" size="small" style="margin-left: 4px">
+                逾期 {{ orderPlan(row)!.lateDays }} 天
+              </el-tag>
+            </template>
+            <span v-else class="muted">未排产</span>
+          </template>
+        </el-table-column>
         <el-table-column label="优先级" width="90">
           <template #default="{ row }">
             <el-tag size="small" :type="priorityLabel[row.priority]?.type">{{ priorityLabel[row.priority]?.text }}</el-tag>
@@ -193,7 +269,7 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
     <!-- 排产看板（甘特图拖拽，4.4） -->
     <template v-else-if="tab === 'gantt'">
       <div class="toolbar">
-        <el-button type="primary" :icon="VideoPlay" @click="store.orders.filter((o) => o.status === 'draft').forEach((o) => store.scheduleOrder(o.id)); ElMessage.success('自动排产完成，拖动工单条即可调整计划')">
+        <el-button type="primary" :icon="VideoPlay" @click="autoScheduleAll">
           一键自动排产
         </el-button>
         <span class="hint">拖动工单条可调整开始时间与所属产线；红色虚线框表示同产线时间冲突；绿色=完成、蓝色=生产中、灰色=待开始、红色=异常</span>
@@ -270,15 +346,44 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
             <el-button size="small" type="primary" :icon="Plus" @click="prDialog = true">新增工序</el-button>
           </div>
           <el-table :data="store.processes" size="small" border>
-            <el-table-column prop="name" label="工序" />
-            <el-table-column prop="hours" label="标准工时(h)" width="110" />
-            <el-table-column prop="deviceType" label="设备类型" width="110" />
-            <el-table-column label="" width="60">
+            <el-table-column prop="name" label="工序" min-width="100" />
+            <el-table-column label="产能(件/时)" width="120">
+              <template #default="{ row }">
+                <el-input-number
+                  :model-value="row.ratePerHour ?? row.hours"
+                  :min="1"
+                  :step="10"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100%"
+                  @change="(v: number) => store.updateProcess(row.id, { ratePerHour: v })"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="换线(h)" width="90">
+              <template #default="{ row }">
+                <el-input-number
+                  :model-value="row.setupHours ?? 0"
+                  :min="0"
+                  :step="0.5"
+                  :precision="1"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100%"
+                  @change="(v: number) => store.updateProcess(row.id, { setupHours: v })"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column prop="deviceType" label="设备类型" width="100" />
+            <el-table-column label="" width="50">
               <template #default="{ row }">
                 <el-button size="small" text type="danger" @click="store.removeProcess(row.id)">删</el-button>
               </template>
             </el-table-column>
           </el-table>
+          <p class="proc-tip">
+            加工时长 = 订单数量 ÷ 产能 + 换线时间。未填写产能时回退为固定工时。
+          </p>
         </div>
         <div class="proc-card">
           <div class="proc-head">
@@ -286,15 +391,69 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
             <el-button size="small" type="primary" :icon="Plus" @click="lnDialog = true">新增产线</el-button>
           </div>
           <el-table :data="store.lines" size="small" border>
-            <el-table-column prop="name" label="产线" />
-            <el-table-column prop="type" label="类型" width="110" />
-            <el-table-column prop="hoursPerDay" label="日工时(h)" width="100" />
-            <el-table-column label="" width="60">
+            <el-table-column prop="name" label="产线" min-width="100" />
+            <el-table-column prop="type" label="类型" width="90" />
+            <el-table-column label="班次" width="180">
+              <template #default="{ row }">
+                <el-time-select
+                  :model-value="String(row.shiftStart ?? 8).padStart(2, '0') + ':00'"
+                  start="00:00"
+                  step="01:00"
+                  end="23:00"
+                  size="small"
+                  style="width: 78px"
+                  @change="(v: string) => store.updateLine(row.id, { shiftStart: Number(String(v).slice(0, 2)) })"
+                />
+                <span class="dash">-</span>
+                <el-time-select
+                  :model-value="String(row.shiftEnd ?? 24).padStart(2, '0') + ':00'"
+                  start="01:00"
+                  step="01:00"
+                  end="24:00"
+                  size="small"
+                  style="width: 78px"
+                  @change="(v: string) => store.updateLine(row.id, { shiftEnd: Number(String(v).slice(0, 2)) })"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="日产能(h)" width="110">
+              <template #default="{ row }">
+                <el-input-number
+                  :model-value="row.hoursPerDay"
+                  :min="1"
+                  :max="24"
+                  :step="1"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100%"
+                  @change="(v: number) => store.updateLine(row.id, { hoursPerDay: v })"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="休息(h)" width="90">
+              <template #default="{ row }">
+                <el-input-number
+                  :model-value="row.breakHours ?? 0"
+                  :min="0"
+                  :max="4"
+                  :step="0.5"
+                  :precision="1"
+                  size="small"
+                  controls-position="right"
+                  style="width: 100%"
+                  @change="(v: number) => store.updateLine(row.id, { breakHours: v })"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="" width="50">
               <template #default="{ row }">
                 <el-button size="small" text type="danger" @click="store.removeLine(row.id)">删</el-button>
               </template>
             </el-table-column>
           </el-table>
+          <p class="proc-tip">
+            排产只在班次时间内进行：例如装配线 08:00-17:00、休息 1h，则每天实际排 8 小时，跨天自动续接。
+          </p>
         </div>
       </div>
     </template>
@@ -364,6 +523,22 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
 </template>
 
 <style scoped>
+.proc-tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #909399;
+}
+.dash {
+  margin: 0 4px;
+  color: #909399;
+}
+.late {
+  color: #f56c6c;
+  font-weight: 600;
+}
+.muted {
+  color: #c0c4cc;
+}
 .production {
   display: flex;
   flex-direction: column;

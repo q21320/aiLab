@@ -5,6 +5,7 @@
 
 import { defineStore } from "pinia";
 import { useAuditStore } from "./audit";
+import { advanceHours, estimateDurationHours, evaluateDue, nextWorkingTime } from "./scheduling";
 
 export type OrderStatus = "draft" | "scheduled" | "producing" | "done";
 
@@ -21,15 +22,28 @@ export interface ProductionOrder {
 export interface ProcessDef {
   id: string;
   name: string;
-  hours: number; // 标准工时（单批）
+  hours: number; // 标准工时（旧字段，保留兼容）
   deviceType: string;
+  /** 每小时产量（件/小时）。有值时优先用它计算加工时长 = 数量 / ratePerHour */
+  ratePerHour?: number;
+  /** 换线准备时间（小时），每次开始该工序前占用 */
+  setupHours?: number;
 }
 
 export interface CapacityLine {
   id: string;
   name: string;
   type: string;
+  /** 每天可用工时（1~24），排产时不会超出该产能 */
   hoursPerDay: number;
+  /** 班次开始时间（小时，0-23），默认 8 点 */
+  shiftStart: number;
+  /** 班次结束时间（小时，0-24），默认 = shiftStart + hoursPerDay */
+  shiftEnd: number;
+  /** 每天固定停机/休息小时数（如午休 1 小时），会从可用工时中扣除 */
+  breakHours?: number;
+  /** 一周中不工作的日期（0=周日 … 6=周六），默认仅周末不排产可选 */
+  offDays?: number[];
 }
 
 export interface WorkOrder {
@@ -130,19 +144,21 @@ function seedOrders(): ProductionOrder[] {
   ];
 }
 function seedProcesses(): ProcessDef[] {
+  // ratePerHour = 每小时产量（件/小时）；加工时长 = 订单数量 / 产能 + 换线时间
   return [
-    { id: "PR-1", name: "SMT 贴片", hours: 8, deviceType: "SMT" },
-    { id: "PR-2", name: "波峰焊", hours: 4, deviceType: "WAVE" },
-    { id: "PR-3", name: "装配联调", hours: 6, deviceType: "ASSEMBLY" },
-    { id: "PR-4", name: "老化测试", hours: 12, deviceType: "AGING" },
+    { id: "PR-1", name: "SMT 贴片", hours: 8, deviceType: "SMT", ratePerHour: 200, setupHours: 1 },
+    { id: "PR-2", name: "波峰焊", hours: 4, deviceType: "WAVE", ratePerHour: 150, setupHours: 0.5 },
+    { id: "PR-3", name: "装配联调", hours: 6, deviceType: "ASSEMBLY", ratePerHour: 100, setupHours: 0.5 },
+    { id: "PR-4", name: "老化测试", hours: 12, deviceType: "AGING", ratePerHour: 50, setupHours: 0 },
   ];
 }
 function seedLines(): CapacityLine[] {
+  // shiftStart/shiftEnd = 每天工作时段；hoursPerDay 为该时段内可用工时
   return [
-    { id: "LN-1", name: "SMT 生产线", type: "SMT", hoursPerDay: 16 },
-    { id: "LN-2", name: "焊接线", type: "WAVE", hoursPerDay: 12 },
-    { id: "LN-3", name: "装配线", type: "ASSEMBLY", hoursPerDay: 8 },
-    { id: "LN-4", name: "老化试验台", type: "AGING", hoursPerDay: 24 },
+    { id: "LN-1", name: "SMT 生产线", type: "SMT", hoursPerDay: 16, shiftStart: 8, shiftEnd: 24, breakHours: 0 },
+    { id: "LN-2", name: "焊接线", type: "WAVE", hoursPerDay: 12, shiftStart: 8, shiftEnd: 20, breakHours: 1 },
+    { id: "LN-3", name: "装配线", type: "ASSEMBLY", hoursPerDay: 8, shiftStart: 8, shiftEnd: 17, breakHours: 1 },
+    { id: "LN-4", name: "老化试验台", type: "AGING", hoursPerDay: 24, shiftStart: 0, shiftEnd: 24, breakHours: 0 },
   ];
 }
 
@@ -243,45 +259,89 @@ export const useProductionStore = defineStore("production", {
     },
 
     /** 依据工序+产能为订单生成工单（顺序排产，round-robin 分配产线） */
-    scheduleOrder(orderId: string) {
+    /**
+     * 为订单自动排产（考虑产能、班次、换线时间）。
+     *
+     * 相比旧实现的改进：
+     *   1) 加工时长 = 数量 / 每小时产能 + 换线时间（旧：固定工时，与数量无关）
+     *   2) 只在产线班次内排产，跨班次自动续接（旧：假设 7×24 可用）
+     *   3) 排完后评估是否超交期，超期给出提示
+     *   4) 返回失败原因，而不是只返回 false
+     */
+    scheduleOrder(orderId: string): { ok: boolean; reason?: string; late?: boolean; lateDays?: number } {
       const order = this.orders.find((o) => o.id === orderId);
-      if (!order) return false;
+      if (!order) return { ok: false, reason: "订单不存在" };
       if (this.workOrders.some((w) => w.orderId === orderId)) {
-        return false; // 已排产
+        return { ok: false, reason: "该订单已排产" };
       }
-      // 排产窗口：今日 9:00 起 7 天
+      if (!this.processes.length) return { ok: false, reason: "尚未配置工序" };
+
       const windowStart = dayStart(0);
-      const windowEnd = dayStart(7);
+      const windowEnd = dayStart(30); // 窗口放宽到 30 天，避免 7 天排不下
+      // 每个工序的「可用起点」：串行依赖，前一个工序结束才能开始下一个
       let cursor = windowStart;
+      const created: WorkOrder[] = [];
+
       for (const p of this.processes) {
         const line = this.lines.find((l) => l.type === p.deviceType) || this.lines[0];
-        if (!line) return false;
-        // 避开该产线已有工单占用（找最早空闲起点）
+        if (!line) return { ok: false, reason: `工序「${p.name}」没有可用产线` };
+
+        // 加工时长：数量/产能 + 换线
+        const durationH = estimateDurationHours(order.qty, p);
+        // 从 cursor 开始找工作时段
+        let start = nextWorkingTime(Math.max(cursor, windowStart), line);
+
+        // 避开该产线已有工单：逐个检查重叠，向后顺延
         const usages = this.workOrders.filter((w) => w.lineId === line.id);
-        while (usages.find((u) => cursor < u.start + u.hours * 3600000 && cursor + p.hours * 3600000 > u.start) && cursor < windowEnd) {
-          cursor = Math.max(...usages.map((u) => u.start + u.hours * 3600000), cursor);
+        let placed = false;
+        for (let attempt = 0; attempt < 200; attempt++) {
+          const end = advanceHours(start, durationH, line);
+          const clash = usages.find((u) => start < u.start + u.hours * 3600000 && end > u.start);
+          if (!clash) {
+            placed = true;
+            break;
+          }
+          // 顺延到冲突工单结束后的下一个工作时刻
+          start = nextWorkingTime(clash.start + clash.hours * 3600000 + 1000, line);
         }
-        if (cursor + p.hours * 3600000 > windowEnd) {
-          return false; // 排产窗口不足
+        if (!placed) {
+          return { ok: false, reason: `产线「${line.name}」排不下工序「${p.name}」` };
         }
-        this.workOrders.push({
+
+        const end = advanceHours(start, durationH, line);
+        if (end > windowEnd) {
+          return { ok: false, reason: `订单需排到 ${new Date(end).toLocaleDateString("zh-CN")}，超出 30 天排产窗口` };
+        }
+
+        created.push({
           id: nextId("WO", this.$state),
           orderId,
           processId: p.id,
           processName: p.name,
           lineId: line.id,
           lineName: line.name,
-          start: cursor,
-          hours: p.hours,
+          start,
+          hours: Math.round(durationH * 10) / 10,
           progress: 0,
           status: "pending",
         });
-        cursor += p.hours * 3600000;
+        cursor = end;
       }
+
+      this.workOrders.push(...created);
       order.status = "scheduled";
+
+      // 交期评估
+      const plannedEnd = cursor;
+      const dueCheck = evaluateDue(plannedEnd, order.due);
       this.persist();
-      useAuditStore().log("排产", "自动排产", `订单 ${orderId} 已生成 ${this.processes.length} 个工单`);
-      return true;
+
+      const detail = dueCheck.late
+        ? `订单 ${orderId} 已排产 ${created.length} 个工单，预计逾期 ${dueCheck.lateDays} 天`
+        : `订单 ${orderId} 已排产 ${created.length} 个工单，预计 ${new Date(plannedEnd).toLocaleDateString("zh-CN")} 完成`;
+      useAuditStore().log("排产", "自动排产", detail);
+
+      return { ok: true, late: dueCheck.late, lateDays: dueCheck.lateDays };
     },
 
     /** 看板拖拽：调整工单产线与开始时间 */
@@ -340,16 +400,56 @@ export const useProductionStore = defineStore("production", {
     },
 
     // ---------- 工艺档案 ----------
-    addProcess(p: { name: string; hours: number; deviceType: string }) {
-      this.processes.push({ id: nextId("PR", this.$state), ...p });
+    addProcess(p: { name: string; hours: number; deviceType: string; ratePerHour?: number; setupHours?: number }) {
+      this.processes.push({
+        id: nextId("PR", this.$state),
+        name: p.name,
+        hours: p.hours,
+        deviceType: p.deviceType,
+        ratePerHour: p.ratePerHour,
+        setupHours: p.setupHours,
+      });
       this.persist();
     },
     removeProcess(id: string) {
       this.processes = this.processes.filter((p) => p.id !== id);
       this.persist();
     },
-    addLine(l: { name: string; type: string; hoursPerDay: number }) {
-      this.lines.push({ id: nextId("LN", this.$state), ...l });
+    addLine(l: {
+      name: string;
+      type: string;
+      hoursPerDay: number;
+      shiftStart?: number;
+      shiftEnd?: number;
+      breakHours?: number;
+    }) {
+      const shiftStart = l.shiftStart ?? 8;
+      this.lines.push({
+        id: nextId("LN", this.$state),
+        name: l.name,
+        type: l.type,
+        hoursPerDay: l.hoursPerDay,
+        shiftStart,
+        shiftEnd: l.shiftEnd ?? Math.min(24, shiftStart + l.hoursPerDay),
+        breakHours: l.breakHours ?? 0,
+      });
+      this.persist();
+    },
+
+    /** 更新产线班次配置 */
+    updateLine(id: string, patch: Partial<CapacityLine>) {
+      const l = this.lines.find((x) => x.id === id);
+      if (!l) return;
+      Object.assign(l, patch);
+      this.persist();
+      useAuditStore().log("排产", "修改产线", `产线 ${l.name} 班次 ${l.shiftStart}:00-${l.shiftEnd}:00，日产能 ${l.hoursPerDay}h`);
+    },
+
+    /** 更新工序产能 */
+    updateProcess(id: string, patch: Partial<ProcessDef>) {
+      const p = this.processes.find((x) => x.id === id);
+      if (!p) return;
+      Object.assign(p, patch);
       this.persist();
     },
     removeLine(id: string) {
