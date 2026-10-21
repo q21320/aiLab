@@ -4,9 +4,15 @@ node_modules/
 # Build output
 dist/
 build/
+# 前端构建产物复制到后端静态目录（由 tools/copy-dist.mjs 生成，不入库）
+backend/public/
+!backend/public/.gitkeep
 
 # Backend runtime data (low-code published apps)
 backend/data/
+# 后端环境变量（含密钥，绝不入库；参考 backend/.env.example）
+backend/.env
+!backend/.env.example
 
 # 打包产物（exe 约 92MB 及中间产物，不入库）
 release/
@@ -36,3 +42,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# 离线交付包（镜像 tar 约 170MB，不进仓库；由 tools 脚本生成）
+dist-release/
+*.tar.gz
