@@ -445,7 +445,11 @@ async function renderChart() {
     const v = h[chartKey.value];
     return typeof v === "number" ? v : null;
   }) as number[];
-  chart.setOption(chartOption("line", labels, values, "#409eff", `${chartDevice.value.name} · ${chartKey.value}`), true);
+  // 标题用点位中文名（原先显示 temperature 这类英文 key）
+  const ptLabel = (chartDevice.value.points || []).find((p) => p.key === chartKey.value)?.label || chartKey.value;
+  const ptUnit = (chartDevice.value.points || []).find((p) => p.key === chartKey.value)?.unit || "";
+  const title = `${chartDevice.value.name} · ${ptLabel}${ptUnit ? `（${ptUnit}）` : ""}`;
+  chart.setOption(chartOption("line", labels, values, "#409eff", title), true);
 }
 function closeChart() {
   chartVisible.value = false;

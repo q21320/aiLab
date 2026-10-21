@@ -38,7 +38,7 @@ const selectedSampleId = ref("");
 const selectedPlan = computed(() => plans.value.find((p) => p.id === selectedPlanId.value));
 
 const currentRun = ref<AutoTestRun | null>(null);
-const liveSeries = ref<{ t: number; values: Record<string, number> }[]>([]);
+const liveSeries = ref<{ t: number; values: Record<string, number>; labels?: Record<string, string>; units?: Record<string, string> }[]>([]);
 const running = ref(false);
 
 onMounted(async () => {
@@ -65,7 +65,7 @@ watch(
     if (ev.line) currentRun.value.progress.push(ev.line);
     if (ev.judgment) currentRun.value.judgments.push(ev.judgment);
     if (ev.sample) {
-      liveSeries.value.push({ t: ev.sample.t, values: ev.sample.values });
+      liveSeries.value.push({ t: ev.sample.t, values: ev.sample.values, labels: ev.sample.labels, units: ev.sample.units });
       renderChart();
     }
     if (ev.loop) currentRun.value.currentLoop = ev.loop;
@@ -157,13 +157,26 @@ const preparing = ref(false);
  * 一键准备可测设备：启动虚拟仪器 → 接入一台带完整点位的 SCPI 设备。
  * 让"想试一下自动化测试"的用户不用先去别的页面配置设备。
  */
+/** 一键准备的设备名（用于识别是否已存在，避免重复创建） */
+const VIRTUAL_DEVICE_NAME = "虚拟试验箱 VC-300（自动测试）";
+
 async function prepareVirtualDevice() {
   preparing.value = true;
   try {
+    // 修复：原先每次点击都新建一台设备，重复点击会产生多台同名设备。
+    // 现在先检查是否已存在可用的同款设备，存在则直接复用。
+    const existing = devices.value.find((d) => d.name === VIRTUAL_DEVICE_NAME && (d.points || []).length > 0);
+    if (existing) {
+      await startSimulator();
+      await loadAll();
+      selectedDeviceId.value = existing.id;
+      ElMessage.success(`已存在可测设备「${existing.name}」，已为你选中（虚拟仪器已启动）`);
+      return;
+    }
     await startSimulator();
     await new Promise((r) => setTimeout(r, 800));
     const res = await addDevice({
-      name: "虚拟试验箱 VC-300（自动测试）",
+      name: VIRTUAL_DEVICE_NAME,
       type: "test",
       protocol: "scpi",
       address: { host: "127.0.0.1", port: 5025 },
@@ -226,7 +239,7 @@ async function viewRun(run: AutoTestRun) {
     currentRun.value = detail.run;
     liveSeries.value = [];
     for (const list of Object.values(detail.run.series || {})) {
-      for (const s of list) liveSeries.value.push({ t: s.t, values: s.values });
+      for (const s of list) liveSeries.value.push({ t: s.t, values: s.values, labels: (s as any).labels, units: (s as any).units });
     }
     liveSeries.value.sort((a, b) => a.t - b.t);
     running.value = detail.run.status === "running";
@@ -240,17 +253,58 @@ async function viewRun(run: AutoTestRun) {
 // ---------------------------------------------------------------------------
 const chartEl = ref<HTMLDivElement | null>(null);
 let chart: ReturnType<typeof echarts.init> | null = null;
+/** 常见点位 key 的中文名兜底（后端/设备点位表都缺失时使用） */
+const BUILTIN_LABELS: Record<string, { label: string; unit?: string }> = {
+  temperature: { label: "温度", unit: "℃" },
+  humidity: { label: "湿度", unit: "%" },
+  power: { label: "功率", unit: "kW" },
+  setpoint: { label: "设定温度", unit: "℃" },
+  pressure: { label: "压力", unit: "kPa" },
+  voltage: { label: "电压", unit: "V" },
+  current: { label: "电流", unit: "A" },
+};
+
+/** 解析点位显示名：后端 labels → 设备点位表 → 内置映射 → 原 key */
+function resolvePointLabel(key: string): string {
+  for (let i = liveSeries.value.length - 1; i >= 0; i--) {
+    const lb = liveSeries.value[i].labels?.[key];
+    if (lb) return lb;
+  }
+  const dev = devices.value.find((d) => d.id === selectedDeviceId.value) ||
+    devices.value.find((d) => d.id === currentRun.value?.deviceId);
+  const pt = (dev?.points || []).find((p) => p.key === key);
+  if (pt?.label) return pt.label;
+  return BUILTIN_LABELS[key]?.label || key;
+}
+
+function resolvePointUnit(key: string): string {
+  for (let i = liveSeries.value.length - 1; i >= 0; i--) {
+    const u = liveSeries.value[i].units?.[key];
+    if (u) return u;
+  }
+  const dev = devices.value.find((d) => d.id === selectedDeviceId.value) ||
+    devices.value.find((d) => d.id === currentRun.value?.deviceId);
+  const pt = (dev?.points || []).find((p) => p.key === key);
+  if (pt?.unit) return pt.unit;
+  return BUILTIN_LABELS[key]?.unit || "";
+}
+
 function renderChart() {
   if (!chartEl.value) return;
   if (!chart) chart = echarts.init(chartEl.value);
   const labels = liveSeries.value.map((s) => new Date(s.t).toLocaleTimeString("zh-CN", { hour12: false }));
   const keys = Array.from(new Set(liveSeries.value.flatMap((s) => Object.keys(s.values)))).slice(0, 4);
-  const series = keys.map((k) => ({
-    type: "line",
-    smooth: true,
-    name: k,
-    data: liveSeries.value.map((s) => s.values[k] ?? null),
-  }));
+  const series = keys.map((k) => {
+    const label = resolvePointLabel(k);
+    const unit = resolvePointUnit(k);
+    return {
+      type: "line",
+      smooth: true,
+      // 图例显示中文名称（原先是 temperature/humidity/power 这类英文 key）
+      name: unit ? `${label}（${unit}）` : label,
+      data: liveSeries.value.map((s) => s.values[k] ?? null),
+    };
+  });
   chart.setOption(
     {
       ...chartOption("line", labels, [], "#409eff", currentRun.value ? `${currentRun.value.planName} · ${currentRun.value.deviceName}` : "自动化测试实时数据"),
@@ -379,7 +433,7 @@ function openReport(id: string) {
             :value="d.id"
           />
         </el-select>
-        <el-button v-if="!hasTestableDevice" type="warning" plain @click="prepareVirtualDevice" :loading="preparing">
+        <el-button v-if="!hasTestableDevice" type="warning" plain :disabled="preparing" :loading="preparing" @click="prepareVirtualDevice">
           一键准备可测设备
         </el-button>
         <el-select v-model="selectedSampleId" placeholder="关联样品（可选）" clearable style="width: 220px">

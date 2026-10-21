@@ -1034,6 +1034,20 @@ async function handle(req, res) {
 
       const d = normalizeDevice(raw);
       if (raw.id && iotState.devices.some((x) => x.id === raw.id)) return sendJSON(res, 400, { error: "设备 ID 已存在" });
+      // 防止重复接入：同名 + 同协议 + 同地址视为同一台设备
+      const addr = raw.address || {};
+      const dup = iotState.devices.find(
+        (x) =>
+          x.name === d.name &&
+          (x.protocol || "mock") === (d.protocol || "mock") &&
+          JSON.stringify(x.address || {}) === JSON.stringify(addr),
+      );
+      if (dup) {
+        return sendJSON(res, 409, {
+          error: `设备「${d.name}」已存在（${dup.id}），请勿重复接入`,
+          existingId: dup.id,
+        });
+      }
       // 设备编号取现有最大值 +1，避免删除后重号
       if (!d.id) {
         const maxNo = iotState.devices.reduce((m, x) => Math.max(m, Number(String(x.id).replace(/\D/g, "")) || 0), 0);

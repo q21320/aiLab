@@ -199,9 +199,12 @@ export function createAutoTestEngine({ dataFile, onEvent, onPoint, getLatestPoin
                 const res = await readDevice(device, { latestPoints: typeof getLatestPoints === "function" ? getLatestPoints(device.id) : [] });
                 const readings = res?.values || {};
                 const arr = run.series[step.key] || (run.series[step.key] = []);
-                const sample = { t: Date.now(), loop, values: {} };
+                const sample = { t: Date.now(), loop, values: {}, labels: {}, units: {} };
                 for (const [k, v] of Object.entries(readings)) {
                   sample.values[k] = v.value;
+                  // 一并记录中文名称与单位，供结果页图表显示（否则图例只有 temperature 这类英文 key）
+                  if (v?.label) sample.labels[k] = v.label;
+                  if (v?.unit) sample.units[k] = v.unit;
                   onPoint?.(device, k, v.value, v.unit);
                 }
                 arr.push(sample);
