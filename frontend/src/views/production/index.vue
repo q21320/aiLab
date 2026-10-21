@@ -6,6 +6,7 @@ import { useProductionStore, type ProductionOrder, type WorkOrder } from "../../
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
 import GanttBoard from "./GanttBoard.vue";
 import LoadAnalysis from "./LoadAnalysis.vue";
+import AchievementReport from "./AchievementReport.vue";
 
 startIotLive();
 const store = useProductionStore();
@@ -13,7 +14,7 @@ const store = useProductionStore();
 onMounted(() => {
   void store.loadFromServer();
 });
-const tab = ref<"orders" | "gantt" | "wos" | "exceptions" | "process" | "load">("gantt");
+const tab = ref<"orders" | "gantt" | "wos" | "exceptions" | "process" | "load" | "achievement">("gantt");
 
 // ---------------------------------------------------------------------------
 // 订单
@@ -423,6 +424,7 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
         <el-tab-pane label="异常管理" name="exceptions" />
         <el-tab-pane label="工序与产能" name="process" />
         <el-tab-pane label="产能负荷" name="load" />
+        <el-tab-pane label="达成率报表" name="achievement" />
       </el-tabs>
       <div class="iot-badge" :class="{ on: iotBadge.connected }">
         物联网：在线设备 {{ iotBadge.online }} 台 · 未处理告警 {{ iotBadge.alerts }} 条
@@ -549,6 +551,11 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
     <!-- 产能负荷 -->
     <template v-else-if="tab === 'load'">
       <LoadAnalysis :lines="store.lines" :work-orders="store.workOrders" :days="7" />
+    </template>
+
+    <!-- 达成率报表 -->
+    <template v-else-if="tab === 'achievement'">
+      <AchievementReport :orders="store.orders" :work-orders="store.workOrders" />
     </template>
 
     <template v-else-if="tab === 'exceptions'">
