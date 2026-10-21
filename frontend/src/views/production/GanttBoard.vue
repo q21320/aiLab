@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ZoomIn, ZoomOut } from "@element-plus/icons-vue";
 import { computed, onBeforeUnmount, ref } from "vue";
 import type { CapacityLine, WorkOrder } from "../../stores/production";
 
@@ -22,9 +23,18 @@ const dayStart = (() => {
 })();
 const ROW_H = 46;
 const HEAD_H = 60;
-const PPH = 9; // 每小时像素
-const DAY_W = 24 * PPH;
-const TOTAL_W = DAYS * DAY_W;
+/** 缩放档位：每小时像素 */
+const ZOOM_STEPS = [3, 6, 9, 14, 20, 30];
+const zoomIdx = ref(2); // 默认 9px/小时
+const PPH = computed(() => ZOOM_STEPS[zoomIdx.value]);
+const DAY_W = computed(() => 24 * PPH.value);
+const TOTAL_W = computed(() => DAYS * DAY_W.value);
+function zoomIn() {
+  if (zoomIdx.value < ZOOM_STEPS.length - 1) zoomIdx.value += 1;
+}
+function zoomOut() {
+  if (zoomIdx.value > 0) zoomIdx.value -= 1;
+}
 
 const now = Date.now();
 
@@ -36,10 +46,10 @@ const days = computed(() =>
 );
 
 function barX(wo: WorkOrder): number {
-  return ((wo.start - dayStart) / 3600000) * PPH;
+  return ((wo.start - dayStart) / 3600000) * PPH.value;
 }
 function barW(wo: WorkOrder): number {
-  return Math.max(16, wo.hours * PPH);
+  return Math.max(16, wo.hours * PPH.value);
 }
 function barColor(wo: WorkOrder): string {
   if (wo.status === "done") return "#67c23a";
@@ -84,7 +94,7 @@ const svgRef = ref<SVGSVGElement | null>(null);
 function toCanvas(ev: MouseEvent): { x: number; y: number } {
   const rect = svgRef.value?.getBoundingClientRect();
   if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
-  const sx = TOTAL_W / rect.width;
+  const sx = TOTAL_W.value / rect.width;
   const sy = (HEAD_H + props.lines.length * ROW_H) / rect.height;
   return { x: (ev.clientX - rect.left) * sx, y: (ev.clientY - rect.top) * sy };
 }
@@ -123,7 +133,7 @@ function onBarMouseUp(ev: MouseEvent) {
     const pt = toCanvas(ev);
     // dx 与 pt 同为 viewBox 单位，相减后就是工单条新的左边距（px 单位与 PPH 一致）
     const x = Math.max(0, pt.x - drag.value.dx);
-    const start = dayStart + (x / PPH) * 3600000;
+    const start = dayStart + (x / PPH.value) * 3600000;
     const line = props.lines[Math.max(0, Math.min(props.lines.length - 1, drag.value.lineIdx))];
     if (line) emit("move", { woId: wo.id, lineId: line.id, start });
   }
@@ -137,6 +147,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="gantt">
+    <div class="gantt-toolbar">
+      <span class="zoom-label">缩放：</span>
+      <el-button size="small" :icon="ZoomOut" :disabled="zoomIdx === 0" @click="zoomOut">缩小</el-button>
+      <span class="zoom-value">{{ PPH }}px/小时</span>
+      <el-button size="small" :icon="ZoomIn" :disabled="zoomIdx === ZOOM_STEPS.length - 1" @click="zoomIn">放大</el-button>
+      <span class="zoom-hint">拖动工单条可调整时间与产线；红色虚线框表示同产线时间冲突</span>
+    </div>
+    <div class="gantt-scroll">
     <svg
       ref="svgRef"
       class="gantt-svg"
@@ -187,10 +205,36 @@ onBeforeUnmount(() => {
       <!-- 当前时刻线 -->
       <line :x1="((now - dayStart) / 3600000) * PPH" y1="30" :x2="((now - dayStart) / 3600000) * PPH" :y2="HEAD_H + lines.length * ROW_H" stroke="#f56c6c" stroke-dasharray="4 3" />
     </svg>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.gantt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.zoom-label {
+  font-size: 13px;
+  color: #606266;
+}
+.zoom-value {
+  font-size: 12px;
+  color: #909399;
+  min-width: 80px;
+  text-align: center;
+}
+.zoom-hint {
+  font-size: 12px;
+  color: #c0c4cc;
+  margin-left: auto;
+}
+.gantt-scroll {
+  overflow-x: auto;
+}
 .gantt {
   background: #fff;
   border-radius: 8px;

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Plus, VideoPlay, Warning, Delete, RefreshRight } from "@element-plus/icons-vue";
-import { useProductionStore, type ProductionOrder } from "../../stores/production";
+import { Plus, VideoPlay, Warning, Delete, RefreshRight, Download } from "@element-plus/icons-vue";
+import { useProductionStore, type ProductionOrder, type WorkOrder } from "../../stores/production";
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
 import GanttBoard from "./GanttBoard.vue";
 
@@ -67,6 +67,110 @@ function schedule(order: ProductionOrder) {
   tab.value = "gantt";
 }
 
+// ---------------------------------------------------------------------------
+// 导出 CSV
+// ---------------------------------------------------------------------------
+function csvCell(v: unknown): string {
+  const raw = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+  // 防公式注入
+  const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return /[",\r\n]/.test(safe) || /^\s|\s$/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+function downloadCsv(filename: string, header: string[], rows: unknown[][]) {
+  const text = "\uFEFF" + [header.map(csvCell).join(","), ...rows.map((r) => r.map(csvCell).join(","))].join("\r\n");
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  ElMessage.success(`已导出 ${filename}`);
+}
+
+/** 导出订单 */
+function exportOrders() {
+  downloadCsv(
+    `订单-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["订单号", "产品", "数量", "交期", "优先级", "状态", "预计完成", "是否逾期"],
+    store.orders.map((o) => {
+      const plan = orderPlan(o);
+      return [
+        o.id,
+        o.product,
+        o.qty,
+        o.due,
+        priorityLabel[o.priority]?.text || o.priority,
+        orderStatusLabel[o.status]?.text || o.status,
+        plan ? new Date(plan.end).toLocaleString("zh-CN", { hour12: false }) : "",
+        plan?.late ? `逾期 ${plan.lateDays} 天` : "否",
+      ];
+    }),
+  );
+}
+
+/** 导出工单 */
+function exportWorkOrders() {
+  downloadCsv(
+    `工单-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["工单号", "订单号", "工序", "产线", "计划开始", "计划工时", "实际工时", "进度%", "状态", "实际产量", "操作人"],
+    filteredWos.value.map((w) => [
+      w.id,
+      w.orderId,
+      w.processName,
+      w.lineName,
+      new Date(w.start).toLocaleString("zh-CN", { hour12: false }),
+      w.hours,
+      w.actualHours ?? "",
+      w.progress,
+      woStatus(w).text,
+      w.actualQty ?? "",
+      w.operator || "",
+    ]),
+  );
+}
+
+// 排产预览
+const previewDialog = ref(false);
+const previewData = ref<{
+  order: ProductionOrder;
+  planned: Array<{ processName: string; lineName: string; start: number; end: number; hours: number }>;
+  plannedEnd: number;
+  late: boolean;
+  lateDays: number;
+} | null>(null);
+
+function openPreview(order: ProductionOrder) {
+  const r = store.previewSchedule(order.id);
+  if (!r.ok) {
+    ElMessage.warning(r.reason || "无法预演该订单");
+    return;
+  }
+  previewData.value = {
+    order,
+    planned: r.planned!,
+    plannedEnd: r.plannedEnd!,
+    late: r.late!,
+    lateDays: r.lateDays!,
+  };
+  previewDialog.value = true;
+}
+
+function confirmSchedule() {
+  const d = previewData.value;
+  if (!d) return;
+  const r = store.scheduleOrder(d.order.id);
+  previewDialog.value = false;
+  if (r.ok) {
+    ElMessage.success(`订单 ${d.order.id} 已按预览方案排产`);
+    tab.value = "gantt";
+  } else {
+    ElMessage.error(r.reason || "排产失败");
+  }
+}
+
 /** 一键自动排产：按优先级(高→低) + 交期(早→晚) 排序后依次排产 */
 function autoScheduleAll() {
   const drafts = store.orders.filter((o) => o.status === "draft");
@@ -117,12 +221,84 @@ async function removeOrder(order: ProductionOrder) {
 // 工单
 // ---------------------------------------------------------------------------
 function startWo(woId: string) {
-  store.setProgress(woId, 20, "running");
-  ElMessage.success("工单已开始生产");
+  const wo = store.workOrders.find((w) => w.id === woId);
+  if (!wo) return;
+  // 开始生产：进度从 0 起，记录实际开始时间
+  store.setProgress(woId, wo.progress || 0, "running");
+  ElMessage.success("工单已开始生产，可随时「录入进度」更新实际完成度");
 }
-function finishWo(woId: string) {
-  store.setProgress(woId, 100, "done");
-  ElMessage.success("工单已完成");
+
+/** 进度录入弹窗 */
+const progressDialog = ref(false);
+const progressWo = ref<WorkOrder | null>(null);
+const progressForm = ref({ progress: 0, actualQty: 0, operator: "", note: "" });
+
+function openProgressDialog(wo: WorkOrder) {
+  progressWo.value = wo;
+  progressForm.value = {
+    progress: wo.progress || 0,
+    actualQty: wo.actualQty ?? 0,
+    operator: wo.operator || "",
+    note: wo.note || "",
+  };
+  progressDialog.value = true;
+}
+
+function saveProgress() {
+  const wo = progressWo.value;
+  if (!wo) return;
+  const p = Number(progressForm.value.progress);
+  if (!Number.isFinite(p) || p < 0 || p > 100) {
+    ElMessage.warning("进度需在 0-100 之间");
+    return;
+  }
+  // 进度 100 视为完成
+  const status: WorkOrder["status"] = p >= 100 ? "done" : p > 0 ? "running" : wo.status;
+  store.setProgress(wo.id, p, status, {
+    actualQty: progressForm.value.actualQty,
+    operator: progressForm.value.operator || undefined,
+    note: progressForm.value.note || undefined,
+  });
+  progressDialog.value = false;
+  ElMessage.success(`工单 ${wo.id} 进度已更新为 ${p}%`);
+}
+
+function finishWo(wo: WorkOrder) {
+  const order = store.orders.find((o) => o.id === wo.orderId);
+  ElMessageBox.prompt(
+    `工单 ${wo.id}（${wo.processName}）\n计划工时 ${wo.hours}h，订单数量 ${order?.qty ?? "-"}\n\n请输入实际耗时（小时）：`,
+    "完成工单",
+    {
+      inputValue: String(wo.hours),
+      inputPattern: /^\d+(\.\d+)?$/,
+      inputErrorMessage: "请输入数字",
+      confirmButtonText: "确认完成",
+    },
+  )
+    .then(({ value }) => {
+      store.setProgress(wo.id, 100, "done", { actualHours: Number(value) });
+      ElMessage.success(`工单 ${wo.id} 已完成，实际工时 ${value}h`);
+    })
+    .catch(() => {});
+}
+
+function raiseWoException(row: WorkOrder) {
+  ElMessageBox.prompt(`请描述工单 ${row.id}（${row.processName}）的异常情况：`, "上报异常", {
+    inputValue: "现场反馈设备故障，暂停生产",
+    confirmButtonText: "上报",
+  })
+    .then(({ value }) => {
+      store.raiseException({
+        orderId: row.orderId,
+        woId: row.id,
+        type: "设备故障",
+        desc: value || "现场反馈异常",
+      });
+      // 工单标记异常
+      store.setProgress(row.id, row.progress, "exception");
+      ElMessage.success("异常已上报，工单已标记为异常");
+    })
+    .catch(() => {});
 }
 function woStatus(wo: any): { text: string; type: string } {
   if (wo.status === "done") return { text: "完成", type: "success" };
@@ -191,6 +367,26 @@ function orderPlan(order: ProductionOrder) {
   };
 }
 
+// 工单筛选与统计
+const woKeyword = ref("");
+const woStatusFilter = ref<"all" | WorkOrder["status"]>("all");
+const filteredWos = computed(() => {
+  const k = woKeyword.value.trim().toLowerCase();
+  return store.workOrders.filter((w) => {
+    if (woStatusFilter.value !== "all" && w.status !== woStatusFilter.value) return false;
+    if (!k) return true;
+    return (
+      w.id.toLowerCase().includes(k) ||
+      w.orderId.toLowerCase().includes(k) ||
+      (w.processName || "").toLowerCase().includes(k)
+    );
+  });
+});
+const totalPlanHours = computed(() => Math.round(filteredWos.value.reduce((a, w) => a + (w.hours || 0), 0) * 10) / 10);
+const totalActualHours = computed(() =>
+  Math.round(filteredWos.value.reduce((a, w) => a + (w.actualHours || 0), 0) * 10) / 10,
+);
+
 const iotBadge = computed(() => ({
   online: iotLive.overview?.online ?? 0,
   alerts: iotLive.overview?.openAlerts ?? 0,
@@ -234,6 +430,7 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
     <!-- 订单管理 -->
     <template v-if="tab === 'orders'">
       <div class="toolbar">
+        <el-button :icon="Download" @click="exportOrders">导出订单</el-button>
         <el-button type="primary" :icon="Plus" @click="openOrderDialog">新增订单</el-button>
         <span class="hint">点击「排产」将按工序 + 产能自动生成工单并进入排产看板</span>
       </div>
@@ -267,6 +464,7 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" :disabled="row.status !== 'draft'" @click="openPreview(row)">预览</el-button>
             <el-button size="small" type="primary" :icon="VideoPlay" :disabled="row.status !== 'draft'" @click="schedule(row)">
               排产
             </el-button>
@@ -290,16 +488,38 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
 
     <!-- 工单与进度 -->
     <template v-else-if="tab === 'wos'">
-      <el-table :data="store.workOrders" border>
+      <div class="toolbar">
+        <el-input v-model="woKeyword" placeholder="搜索工单号 / 订单号 / 工序" clearable style="width: 240px" />
+        <el-select v-model="woStatusFilter" style="width: 140px">
+          <el-option label="全部状态" value="all" />
+          <el-option label="待开始" value="pending" />
+          <el-option label="生产中" value="running" />
+          <el-option label="已完成" value="done" />
+          <el-option label="异常" value="exception" />
+        </el-select>
+        <div class="spacer" />
+        <span class="wo-summary">
+          共 {{ filteredWos.length }} 个工单 · 计划 {{ totalPlanHours }}h · 实际 {{ totalActualHours }}h
+        </span>
+        <el-button :icon="Download" @click="exportWorkOrders">导出工单</el-button>
+      </div>
+      <el-table :data="filteredWos" border>
         <el-table-column prop="id" label="工单号" width="110" />
         <el-table-column prop="orderId" label="来源订单" width="110" />
-        <el-table-column prop="processName" label="工序" width="120" />
-        <el-table-column prop="lineName" label="产线" width="140" />
-        <el-table-column label="计划开始" width="150">
-          <template #default="{ row }">{{ new Date(row.start).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }}</template>
+        <el-table-column prop="processName" label="工序" width="110" />
+        <el-table-column prop="lineName" label="产线" width="120" />
+        <el-table-column label="计划开始" width="140">
+          <template #default="{ row }">{{ new Date(row.start).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) }}</template>
         </el-table-column>
-        <el-table-column prop="hours" label="工时(h)" width="80" />
-        <el-table-column label="进度" min-width="160">
+        <el-table-column label="计划/实际工时" width="130">
+          <template #default="{ row }">
+            <span>{{ row.hours }}h</span>
+            <span v-if="row.actualHours != null" class="actual-hours">
+              / <b :class="{ overrun: row.actualHours > row.hours }">{{ row.actualHours }}h</b>
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="进度" min-width="150">
           <template #default="{ row }">
             <el-progress :percentage="row.progress" :status="row.status === 'done' ? 'success' : row.status === 'exception' ? 'exception' : undefined" />
           </template>
@@ -309,15 +529,17 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
             <el-tag size="small" :type="woStatus(row).type">{{ woStatus(row).text }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button v-if="row.status === 'pending'" size="small" type="primary" @click="startWo(row.id)">开始</el-button>
-            <el-button v-if="row.status === 'running'" size="small" type="success" @click="finishWo(row.id)">完成</el-button>
-            <el-button size="small" :icon="Warning" @click="store.raiseException({ orderId: row.orderId, woId: row.id, type: '设备故障', desc: `${row.processName} 进度异常，现场反馈暂停` }); ElMessage.success('已对工单上报异常')">
-              异常
-            </el-button>
+            <el-button v-if="row.status === 'running' || row.status === 'pending'" size="small" type="success" @click="openProgressDialog(row)">录入进度</el-button>
+            <el-button v-if="row.status === 'running'" size="small" @click="finishWo(row)">完成</el-button>
+            <el-button size="small" :icon="Warning" @click="raiseWoException(row)">异常</el-button>
           </template>
         </el-table-column>
+        <template #empty>
+          <el-empty description="暂无工单，请先在订单管理中排产" />
+        </template>
       </el-table>
     </template>
 
@@ -469,6 +691,69 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
       </div>
     </template>
 
+    <!-- 排产预览对话框 -->
+    <el-dialog v-model="previewDialog" title="排产预览（确认后才会写入）" width="720px" top="6vh">
+      <template v-if="previewData">
+        <div class="preview-head">
+          <b>{{ previewData.order.id }}</b> · {{ previewData.order.product }} ·
+          数量 {{ previewData.order.qty }} · 交期 {{ previewData.order.due || "未定" }}
+        </div>
+        <el-table :data="previewData.planned" size="small" border>
+          <el-table-column label="#" width="50" type="index" />
+          <el-table-column prop="processName" label="工序" width="120" />
+          <el-table-column prop="lineName" label="产线" width="130" />
+          <el-table-column label="开始" width="160">
+            <template #default="{ row }">{{ new Date(row.start).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) }}</template>
+          </el-table-column>
+          <el-table-column label="结束" width="160">
+            <template #default="{ row }">{{ new Date(row.end).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) }}</template>
+          </el-table-column>
+          <el-table-column prop="hours" label="工时(h)" width="90" />
+        </el-table>
+        <el-alert
+          class="mt12"
+          :type="previewData.late ? 'warning' : 'success'"
+          :closable="false"
+          show-icon
+          :title="previewData.late
+            ? `⚠️ 预计 ${new Date(previewData.plannedEnd).toLocaleString('zh-CN', { hour12: false })} 完成，将逾期 ${previewData.lateDays} 天`
+            : `✅ 预计 ${new Date(previewData.plannedEnd).toLocaleString('zh-CN', { hour12: false })} 完成，在交期内`"
+        />
+        <p class="dialog-tip">
+          本方案基于当前工序产能、产线班次与已有排产计算。确认后将生成 {{ previewData.planned.length }} 个工单。
+        </p>
+      </template>
+      <template #footer>
+        <el-button @click="previewDialog = false">取消</el-button>
+        <el-button type="primary" @click="confirmSchedule">确认排产</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 进度录入对话框 -->
+    <el-dialog v-model="progressDialog" :title="`录入进度 · ${progressWo?.id || ''}（${progressWo?.processName || ''}）`" width="460px">
+      <div class="form-field">
+        <label>完成进度（%）</label>
+        <el-slider v-model="progressForm.progress" :step="5" show-input :show-input-controls="false" />
+      </div>
+      <div class="form-field">
+        <label>实际产量</label>
+        <el-input-number v-model="progressForm.actualQty" :min="0" style="width: 100%" />
+      </div>
+      <div class="form-field">
+        <label>操作人</label>
+        <el-input v-model="progressForm.operator" placeholder="如：张工" />
+      </div>
+      <div class="form-field">
+        <label>备注</label>
+        <el-input v-model="progressForm.note" type="textarea" :rows="2" placeholder="可选" />
+      </div>
+      <p class="dialog-tip">进度填 100% 即视为该工单完成。</p>
+      <template #footer>
+        <el-button @click="progressDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveProgress">保存</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 订单对话框 -->
     <el-dialog v-model="orderDialog" title="新增订单" width="480px">
       <div class="form-field"><label>产品名称</label><el-input v-model="orderForm.product" placeholder="如：电源模块 PSU-200" /></div>
@@ -534,6 +819,35 @@ function onGanttMove(payload: { woId: string; lineId: string; start: number }) {
 </template>
 
 <style scoped>
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.spacer {
+  flex: 1;
+}
+.wo-summary {
+  font-size: 13px;
+  color: #606266;
+}
+.actual-hours b.overrun {
+  color: #f56c6c;
+}
+.preview-head {
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: #303133;
+}
+.mt12 {
+  margin-top: 12px;
+}
+.dialog-tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #909399;
+}
 .sync-badge {
   display: flex;
   justify-content: flex-end;

@@ -55,9 +55,21 @@ export interface WorkOrder {
   lineId: string;
   lineName: string;
   start: number; // 计划开始时间戳
-  hours: number;
+  hours: number; // 计划工时
   progress: number; // 0-100
   status: "pending" | "running" | "done" | "exception";
+  /** 实际开始时间（开始生产时记录） */
+  actualStart?: number;
+  /** 实际结束时间（完成时记录） */
+  actualEnd?: number;
+  /** 实际工时（人工录入或由实际起止计算） */
+  actualHours?: number;
+  /** 实际产量（用于良率/达成率统计） */
+  actualQty?: number;
+  /** 操作人 */
+  operator?: string;
+  /** 备注 */
+  note?: string;
 }
 
 export interface ExceptionRecord {
@@ -371,31 +383,37 @@ export const useProductionStore = defineStore("production", {
      *   3) 排完后评估是否超交期，超期给出提示
      *   4) 返回失败原因，而不是只返回 false
      */
-    scheduleOrder(orderId: string): { ok: boolean; reason?: string; late?: boolean; lateDays?: number } {
+    /**
+     * 排产预演（dry-run）：只计算工单计划，不写入 store。
+     * 用于「先看方案再确认」，避免一键排产后发现不合理又要重排。
+     */
+    previewSchedule(orderId: string, extraWorkOrders: WorkOrder[] = []) {
       const order = this.orders.find((o) => o.id === orderId);
-      if (!order) return { ok: false, reason: "订单不存在" };
+      if (!order) return { ok: false as const, reason: "订单不存在" };
       if (this.workOrders.some((w) => w.orderId === orderId)) {
-        return { ok: false, reason: "该订单已排产" };
+        return { ok: false as const, reason: "该订单已排产" };
       }
-      if (!this.processes.length) return { ok: false, reason: "尚未配置工序" };
+      if (!this.processes.length) return { ok: false as const, reason: "尚未配置工序" };
 
       const windowStart = dayStart(0);
-      const windowEnd = dayStart(30); // 窗口放宽到 30 天，避免 7 天排不下
-      // 每个工序的「可用起点」：串行依赖，前一个工序结束才能开始下一个
+      const windowEnd = dayStart(30);
       let cursor = windowStart;
-      const created: WorkOrder[] = [];
+      const planned: Array<{
+        processName: string;
+        lineName: string;
+        start: number;
+        end: number;
+        hours: number;
+      }> = [];
+      // 已有工单 + 本次预演已占用的工单，都参与冲突检测
+      const taken = [...this.workOrders, ...extraWorkOrders];
 
       for (const p of this.processes) {
         const line = this.lines.find((l) => l.type === p.deviceType) || this.lines[0];
-        if (!line) return { ok: false, reason: `工序「${p.name}」没有可用产线` };
-
-        // 加工时长：数量/产能 + 换线
+        if (!line) return { ok: false as const, reason: `工序「${p.name}」没有可用产线` };
         const durationH = estimateDurationHours(order.qty, p);
-        // 从 cursor 开始找工作时段
         let start = nextWorkingTime(Math.max(cursor, windowStart), line);
-
-        // 避开该产线已有工单：逐个检查重叠，向后顺延
-        const usages = this.workOrders.filter((w) => w.lineId === line.id);
+        const usages = taken.filter((w) => w.lineId === line.id);
         let placed = false;
         for (let attempt = 0; attempt < 200; attempt++) {
           const end = advanceHours(start, durationH, line);
@@ -404,47 +422,63 @@ export const useProductionStore = defineStore("production", {
             placed = true;
             break;
           }
-          // 顺延到冲突工单结束后的下一个工作时刻
           start = nextWorkingTime(clash.start + clash.hours * 3600000 + 1000, line);
         }
-        if (!placed) {
-          return { ok: false, reason: `产线「${line.name}」排不下工序「${p.name}」` };
-        }
-
+        if (!placed) return { ok: false as const, reason: `产线「${line.name}」排不下工序「${p.name}」` };
         const end = advanceHours(start, durationH, line);
         if (end > windowEnd) {
-          return { ok: false, reason: `订单需排到 ${new Date(end).toLocaleDateString("zh-CN")}，超出 30 天排产窗口` };
+          return { ok: false as const, reason: `订单需排到 ${new Date(end).toLocaleDateString("zh-CN")}，超出 30 天窗口` };
         }
+        planned.push({ processName: p.name, lineName: line.name, start, end, hours: durationH });
+        cursor = end;
+      }
 
+      const plannedEnd = cursor;
+      const dueCheck = evaluateDue(plannedEnd, order.due);
+      return {
+        ok: true as const,
+        order,
+        planned,
+        plannedEnd,
+        late: dueCheck.late,
+        lateDays: dueCheck.lateDays,
+      };
+    },
+
+    scheduleOrder(orderId: string): { ok: boolean; reason?: string; late?: boolean; lateDays?: number } {
+      // 复用预演逻辑，保证「预览」与「实际排产」结果完全一致
+      const preview = this.previewSchedule(orderId);
+      if (!preview.ok) return { ok: false, reason: preview.reason };
+
+      const order = preview.order!;
+      const created: WorkOrder[] = [];
+      for (const item of preview.planned) {
+        const p = this.processes.find((x) => x.name === item.processName);
+        const line = this.lines.find((l) => l.name === item.lineName);
         created.push({
           id: nextId("WO", this.$state),
           orderId,
-          processId: p.id,
-          processName: p.name,
-          lineId: line.id,
-          lineName: line.name,
-          start,
-          hours: Math.round(durationH * 10) / 10,
+          processId: p?.id || "",
+          processName: item.processName,
+          lineId: line?.id || "",
+          lineName: item.lineName,
+          start: item.start,
+          hours: Math.round(item.hours * 10) / 10,
           progress: 0,
           status: "pending",
         });
-        cursor = end;
       }
 
       this.workOrders.push(...created);
       order.status = "scheduled";
-
-      // 交期评估
-      const plannedEnd = cursor;
-      const dueCheck = evaluateDue(plannedEnd, order.due);
       this.persist();
 
-      const detail = dueCheck.late
-        ? `订单 ${orderId} 已排产 ${created.length} 个工单，预计逾期 ${dueCheck.lateDays} 天`
-        : `订单 ${orderId} 已排产 ${created.length} 个工单，预计 ${new Date(plannedEnd).toLocaleDateString("zh-CN")} 完成`;
+      const detail = preview.late
+        ? `订单 ${orderId} 已排产 ${created.length} 个工单，预计逾期 ${preview.lateDays} 天`
+        : `订单 ${orderId} 已排产 ${created.length} 个工单，预计 ${new Date(preview.plannedEnd).toLocaleDateString("zh-CN")} 完成`;
       useAuditStore().log("排产", "自动排产", detail);
 
-      return { ok: true, late: dueCheck.late, lateDays: dueCheck.lateDays };
+      return { ok: true, late: preview.late, lateDays: preview.lateDays };
     },
 
     /** 看板拖拽：调整工单产线与开始时间 */
@@ -461,18 +495,75 @@ export const useProductionStore = defineStore("production", {
       useAuditStore().log("排产", "拖拽调整计划", `工单 ${woId} → ${line.name}，开始 ${new Date(wo.start).toLocaleString("zh-CN")}`);
     },
 
-    setProgress(woId: string, progress: number, status: WorkOrder["status"]) {
+    /**
+     * 更新工单进度与状态，并记录实际起止时间。
+     *
+     * 相比旧实现（硬编码 20%/100%），现在：
+     *   · 开始生产时记录 actualStart
+     *   · 完成时记录 actualEnd，并据实际起止算出 actualHours
+     *   · 支持录入实际产量 actualQty 与操作人
+     *   · 订单全部工单完成时订单自动置为完成
+     */
+    setProgress(
+      woId: string,
+      progress: number,
+      status: WorkOrder["status"],
+      extra?: { actualHours?: number; actualQty?: number; operator?: string; note?: string; actualStart?: number },
+    ) {
       const wo = this.workOrders.find((w) => w.id === woId);
       if (!wo) return;
-      wo.progress = Math.max(0, Math.min(100, progress));
+      const prevStatus = wo.status;
+      wo.progress = Math.max(0, Math.min(100, Math.round(progress)));
       wo.status = status;
+
+      // 实际开始
+      if (status === "running" && !wo.actualStart) {
+        wo.actualStart = extra?.actualStart ?? Date.now();
+      }
+      // 实际结束
+      if (status === "done") {
+        wo.actualStart = wo.actualStart ?? extra?.actualStart ?? Date.now();
+        wo.actualEnd = Date.now();
+        // 实际工时：优先取录入值，否则按实际起止计算
+        if (extra?.actualHours !== undefined && Number.isFinite(extra.actualHours)) {
+          wo.actualHours = Math.max(0, Number(extra.actualHours));
+        } else if (!wo.actualHours) {
+          wo.actualHours = Math.round(((wo.actualEnd - wo.actualStart) / 3600000) * 10) / 10;
+        }
+        wo.progress = 100;
+      }
+      if (extra?.actualQty !== undefined) wo.actualQty = Math.max(0, Number(extra.actualQty));
+      if (extra?.operator) wo.operator = extra.operator;
+      if (extra?.note !== undefined) wo.note = extra.note;
+
+      // 全部工单完成 → 订单完成
       if (status === "done") {
         const order = this.orders.find((o) => o.id === wo.orderId);
         if (order && this.workOrders.filter((w) => w.orderId === order.id).every((x) => x.status === "done")) {
           order.status = "done";
         }
+      } else if (status === "running" && prevStatus === "pending") {
+        const order = this.orders.find((o) => o.id === wo.orderId);
+        if (order && order.status === "scheduled") order.status = "producing";
       }
+
       this.persist();
+      const label = status === "done" ? "完成" : status === "running" ? "开始生产" : "更新进度";
+      useAuditStore().log("排产", `工单${label}`, `工单 ${woId}（${wo.processName}）进度 ${wo.progress}%${wo.actualHours ? `，实际工时 ${wo.actualHours}h` : ""}`);
+    },
+
+    /** 删除工单（返工/重排时使用） */
+    removeWorkOrder(woId: string) {
+      const idx = this.workOrders.findIndex((w) => w.id === woId);
+      if (idx < 0) return;
+      const wo = this.workOrders[idx];
+      this.workOrders.splice(idx, 1);
+      // 若订单已无工单，回退为草稿状态，允许重新排产
+      const left = this.workOrders.filter((w) => w.orderId === wo.orderId);
+      const order = this.orders.find((o) => o.id === wo.orderId);
+      if (order && !left.length) order.status = "draft";
+      this.persist();
+      useAuditStore().log("排产", "删除工单", `删除工单 ${woId}（${wo.processName}）`);
     },
 
     // ---------- 异常 ----------
