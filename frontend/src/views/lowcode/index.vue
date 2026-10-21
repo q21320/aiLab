@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
@@ -18,6 +18,7 @@ import FlowDesigner from "../../lowcode/FlowDesigner.vue";
 import ReportDesigner from "../../lowcode/ReportDesigner.vue";
 import ScreenDesigner from "../../lowcode/ScreenDesigner.vue";
 import { useLowcodeStore } from "../../lowcode/store";
+import { usePublishStore } from "../../lowcode/publish";
 
 const store = useLowcodeStore();
 store.init();
@@ -34,6 +35,21 @@ watch(
     if (["page", "form", "flow", "report", "screen"].includes(key)) {
       active.value = key as typeof active.value;
     }
+  },
+  { immediate: true }
+);
+
+// 「应用中心 · 重新设计」：?appId=xxx 时加载该应用的真实 Schema，而不是内置示例
+const publishStore = usePublishStore();
+const targetSchema = ref<unknown>(null);
+watch(
+  () => [route.query.appId, route.query.tab],
+  () => {
+    const appId = String(route.query.appId || "");
+    targetSchema.value = null;
+    if (!appId) return;
+    const app = publishStore.apps.find((a) => a.id === appId);
+    if (app) targetSchema.value = app.schema;
   },
   { immediate: true }
 );
@@ -67,6 +83,9 @@ async function resetAll() {
     /* 取消 */
   }
 }
+
+/** 切换目标应用时强制重建设计器（KeepAlive 下否则会沿用旧实例数据） */
+const designerKey = computed(() => `${active.value}:${String(route.query.appId || "")}`);
 
 function designerFor(key: string) {
   if (key === "form") return FormDesigner;
@@ -113,7 +132,7 @@ function designerFor(key: string) {
     <!-- 设计器主体（KeepAlive 保持各设计器状态） -->
     <div class="platform-body">
       <KeepAlive>
-        <component :is="designerFor(active)" />
+        <component :is="designerFor(active)" :key="designerKey" :schema="targetSchema" />
       </KeepAlive>
     </div>
 

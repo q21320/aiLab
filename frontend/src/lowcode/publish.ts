@@ -16,6 +16,7 @@ import {
   deleteAppFromServer,
 } from "../api/lowcode";
 import { clone } from "./schemaOps";
+import { sanitizeSchemaTree } from "./sanitize";
 import { useAuditStore } from "../stores/audit";
 
 export type PublishKind = "page" | "form" | "flow" | "report" | "screen";
@@ -117,14 +118,16 @@ export const usePublishStore = defineStore("lowcode-publish", {
       schema: any,
       opts?: { name?: string; menu?: boolean }
     ): Promise<{ app: PublishedApp; synced: boolean; error?: string }> {
-      const id = (schema && schema.id) || `${kind}_${Date.now()}`;
+      // 发布前统一清洗：样式白名单 + 图片地址协议校验（运行页会直接渲染这份数据）
+      const safeSchema = sanitizeSchemaTree(clone(schema));
+      const id = (safeSchema && safeSchema.id) || `${kind}_${Date.now()}`;
       const exist = this.apps.find((a) => a.kind === kind && a.id === id);
       const now = Date.now();
       const app: PublishedApp = {
         id,
         kind,
         name: opts?.name || schema?.name || schema?.text || "未命名应用",
-        schema: clone(schema),
+        schema: safeSchema,
         publishedAt: exist?.publishedAt || now,
         updatedAt: now,
         enable: true,

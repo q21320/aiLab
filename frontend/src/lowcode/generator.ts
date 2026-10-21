@@ -4,9 +4,9 @@
 import type { PageSchema } from "./types";
 
 // ============ API 配置 ============
-const API_BASE = "/api/dashscope/compatible-mode";
-const MODEL_NAME = "qwen-max";
-const API_KEY = "sk-ws-H.ERLDRYH.nJdG.MEUCIHqWZeG7jsSsfrGnCy5F_GPw2Pl8KrLDugrsPWypUEZSAiEA6RBWD_p3y1ErgEY8ybLgHG9DOi1p0Q-DIL2PhV6veP0";
+// 安全：密钥绝不进入前端代码。前端只调用同源代理接口 `/api/ai/generate`，
+// 由后端从环境变量 DASHSCOPE_API_KEY 读取密钥并转发到阿里云。
+const AI_ENDPOINT = "/api/ai/generate";
 
 // 系统提示词：指导模型返回符合我们 Schema 规范的 JSON
 const SYSTEM_PROMPT = `你是一个 AI 低代码页面生成器。根据用户描述，输出一个 JSON 对象来描述页面结构。
@@ -132,58 +132,38 @@ export interface GenerateResult {
   matched: string;
 }
 
-/** 调用 Qwen3 API */
+/** 调用后端 AI 代理（后端持有密钥并转发到 Qwen，前端不接触密钥） */
 async function callAI(prompt: string): Promise<string> {
-  const url = `${API_BASE}/v1/chat/completions`;
-  console.log("[AI] 请求 URL:", url);
-  console.log("[AI] 请求内容:", prompt);
-  
-  const response = await fetch(url, {
+  const response = await fetch(AI_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${API_KEY}`
-    },
-    body: JSON.stringify({
-      model: MODEL_NAME,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.7,
-      enable_thinking: false
-    })
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, system: SYSTEM_PROMPT }),
   });
-  
-  console.log("[AI] 响应状态:", response.status);
-  if (!response.ok) throw new Error(`API 请求失败：${response.status} ${response.statusText}`);
-  
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({} as Record<string, string>));
+    const hint =
+      response.status === 503
+        ? "后端未配置 DASHSCOPE_API_KEY（请设置环境变量或 backend/.env）"
+        : body.error || response.statusText;
+    throw new Error(`AI 请求失败：${response.status} ${hint}`);
+  }
+
   const data = await response.json();
-  console.log("[AI] 完整响应:", data);
-  
-  const content = data.choices?.[0]?.message?.content || "";
-  console.log("[AI] 模型返回内容:", content);
-  return content;
+  if (!data?.content) throw new Error(data?.error || "AI 未返回内容");
+  return String(data.content);
 }
 
 /** 从 AI 返回的文本中提取 JSON */
 function extractJSON(text: string): string {
-  console.log("[AI] 原始文本:", text);
   // 移除可能存在的 <think>...</think> 思考过程
   text = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
   // 尝试提取 ```json ... ``` 块
   const mdMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (mdMatch) {
-    console.log("[AI] 提取到 markdown 代码块");
-    return mdMatch[1];
-  }
+  if (mdMatch) return mdMatch[1];
   // 尝试提取第一个 {...} 块
   const braceMatch = text.match(/(\{[\s\S]*\})/);
-  if (braceMatch) {
-    console.log("[AI] 提取到 JSON 对象");
-    return braceMatch[1];
-  }
-  console.log("[AI] 未提取到 JSON，返回原文本");
+  if (braceMatch) return braceMatch[1];
   return text;
 }
 
@@ -193,10 +173,8 @@ function extractJSON(text: string): string {
 export async function generateSchema(prompt: string): Promise<GenerateResult> {
   const jsonStr = await callAI(prompt);
   const json = extractJSON(jsonStr);
-  console.log("[AI] 提取的 JSON:", json);
   const schema = JSON.parse(json) as PageSchema;
   // 简单校验
   if (!schema.type || schema.type !== "page") throw new Error("根节点 type 不是 page");
-  console.log("[AI] 生成成功");
   return { schema, matched: "AI 生成" };
 }

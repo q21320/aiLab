@@ -6,8 +6,10 @@ import { Download, Upload, FolderOpened } from "@element-plus/icons-vue";
 import { useUserStore } from "../../stores/user";
 import { useAuditStore } from "../../stores/audit";
 
+
 const userStore = useUserStore();
 const auditStore = useAuditStore();
+const pwdSaving = ref(false);
 
 // 基本设置
 const basicForm = reactive({
@@ -62,13 +64,22 @@ function saveNotify() {
   ElMessage.success("通知设置已保存");
 }
 
-function changePassword() {
-  pwdRef.value?.validate((valid) => {
-    if (!valid) return;
+async function changePassword() {
+  const valid = await pwdRef.value?.validate().catch(() => false);
+  if (!valid || pwdSaving.value) return;
+  pwdSaving.value = true;
+  try {
+    // 由服务端校验原密码并更新散列（原实现只在前端提示成功，密码实际未变）
+    const res = await userStore.changePassword(pwdForm.oldPassword, pwdForm.newPassword);
+    if (!res.ok) {
+      ElMessage.error(res.error || "密码修改失败");
+      return;
+    }
     ElMessage.success("密码修改成功");
-    auditStore.log("安全", "修改密码", "修改了登录密码");
     pwdRef.value?.resetFields();
-  });
+  } finally {
+    pwdSaving.value = false;
+  }
 }
 
 // ---------------------------------------------------------------------------

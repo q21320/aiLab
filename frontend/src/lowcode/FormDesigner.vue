@@ -28,7 +28,10 @@ import { clone, uid } from "./schemaOps";
 import { formToVue } from "./formExporter";
 
 const store = useLowcodeStore();
-const form = ref<FormSchema>(clone(store.projects.form || defaultFormSchema()));
+
+// 从「应用中心 · 重新设计」进入时，父级传入该应用的真实 Schema（修复：原先永远加载内置示例）
+const props = defineProps<{ schema?: FormSchema | null }>();
+const form = ref<FormSchema>(clone(props.schema || store.projects.form || defaultFormSchema()));
 const selectedId = ref("");
 const selectedField = computed<FormField | undefined>(() =>
   form.value.fields.find((f) => f.id === selectedId.value)
@@ -370,7 +373,7 @@ onMounted(() => window.addEventListener("keydown", onKeydown));
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 
 function resetExample() {
-  form.value = clone(defaultFormSchema());
+  form.value = { ...clone(defaultFormSchema()), id: uid("form") };
   selectedId.value = "";
   ElMessage.success("已恢复示例表单");
 }

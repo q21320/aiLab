@@ -53,6 +53,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: "设备接入", icon: "Monitor", roles: ["admin", "operator"] as UserRole[] },
       },
       {
+        path: "alerts",
+        name: "IotAlerts",
+        component: () => import("../views/alerts/index.vue"),
+        meta: { title: "告警管理", icon: "Warning", roles: ["admin", "operator", "viewer"] as UserRole[] },
+      },
+      {
         path: "autotest",
         name: "AutoTest",
         component: () => import("../views/autotest/index.vue"),
@@ -107,20 +113,32 @@ const router = createRouter({
   routes,
 });
 
-// 全局前置守卫：未登录跳转到登录页；角色不满足返回仪表盘
-router.beforeEach((to, _from, next) => {
+// 全局前置守卫：未登录跳转到登录页（带 redirect）；角色不满足返回仪表盘
+// 安全：角色来自服务端会话（/api/auth/me），localStorage 中自报的角色不再可信
+let sessionChecked = false;
+router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore();
   document.title = (to.meta.title as string) || "实验室数字化管理平台";
 
-  if (to.meta.public) {
-    next();
-  } else if (!userStore.token) {
-    next("/login");
-  } else if ((to.meta.roles as UserRole[] | undefined) && !userStore.hasRole(to.meta.roles as UserRole[])) {
-    next("/dashboard");
-  } else {
-    next();
+  // 首次进入（或刷新）时向服务端确认会话，避免仅凭本地缓存放行
+  if (!sessionChecked) {
+    await userStore.refresh();
+    sessionChecked = true;
   }
+
+  if (to.meta.public) {
+    // 已登录用户访问登录页 → 直接回首页
+    if (to.path === "/login" && userStore.token) return next("/dashboard");
+    return next();
+  }
+
+  if (!userStore.token) {
+    return next({ path: "/login", query: to.fullPath === "/" ? {} : { redirect: to.fullPath } });
+  }
+  if ((to.meta.roles as UserRole[] | undefined) && !userStore.hasRole(to.meta.roles as UserRole[])) {
+    return next("/dashboard");
+  }
+  next();
 });
 
 export default router;

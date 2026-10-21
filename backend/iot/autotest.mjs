@@ -9,14 +9,14 @@
 // 支持 loops 循环（如高低温循环 3 次），全部判定通过 → 合格。
 // ============================================================================
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { readDevice, writeDevicePoint } from "./drivers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const round = (v, d = 2) => (typeof v === "number" && Number.isFinite(v) ? Number(v.toFixed(d)) : v);
 
-export function createAutoTestEngine({ dataFile, onEvent, onPoint }) {
+export function createAutoTestEngine({ dataFile, onEvent, onPoint, getLatestPoints }) {
   let state = { plans: [], runs: [], serial: 100 };
 
   try {
@@ -27,9 +27,23 @@ export function createAutoTestEngine({ dataFile, onEvent, onPoint }) {
   function persist() {
     try {
       mkdirSync(dirname(dataFile), { recursive: true });
-      writeFileSync(dataFile, JSON.stringify(state, null, 2), "utf-8");
+      // 原子写：避免崩溃时留下截断的 JSON（截断会导致下次启动回退为空 state，历史全部丢失）
+      const tmp = `${dataFile}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state, null, 2), "utf-8");
+      renameSync(tmp, dataFile);
     } catch (e) {
       console.error("[autotest] 保存测试数据失败：", e.message);
+    }
+  }
+
+  // 崩溃恢复：进程重启后仍标记为 running 的记录不可能再继续，标记为已中止，
+  // 否则 runPlan 的「该设备已有测试任务在执行」判断会永久拒绝该设备的新测试。
+  for (const r of state.runs) {
+    if (r.status === "running") {
+      r.status = "aborted";
+      r.conclusion = "aborted";
+      r.finishedAt = Date.now();
+      r.progress = [...(r.progress || []), `[${new Date().toLocaleTimeString("zh-CN")}] 服务重启，任务已中止`];
     }
   }
 
@@ -181,7 +195,8 @@ export function createAutoTestEngine({ dataFile, onEvent, onPoint }) {
               const count = Math.max(1, Math.min(step.count || 1, 200));
               const interval = Math.min(step.interval || 1, 60);
               for (let i = 1; i <= count; i++) {
-                const res = await readDevice(device);
+                // mock 驱动依赖 ctx.latestPoints；不传时所有采样都是 null → 恒判不合格
+                const res = await readDevice(device, { latestPoints: typeof getLatestPoints === "function" ? getLatestPoints(device.id) : [] });
                 const readings = res?.values || {};
                 const arr = run.series[step.key] || (run.series[step.key] = []);
                 const sample = { t: Date.now(), loop, values: {} };

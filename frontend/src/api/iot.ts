@@ -55,11 +55,39 @@ export interface IotPoint {
 export interface IotAlert {
   id: string;
   deviceId: string;
+  deviceName?: string;
   level: "warn" | "error";
   message: string;
   time: number;
   status: "open" | "acked";
   ackedAt?: number;
+  ackedBy?: string;
+}
+
+export interface AlertQuery {
+  status?: "open" | "acked" | "all";
+  level?: "warn" | "error" | "all";
+  deviceId?: string;
+  keyword?: string;
+  from?: number;
+  to?: number;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface AlertPage {
+  alerts: IotAlert[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface AlertStats {
+  total: number;
+  open: number;
+  open_error: number;
+  open_warn: number;
+  acked: number;
 }
 
 export interface IotOverview {
@@ -97,8 +125,33 @@ export function fetchDevices(): Promise<{ devices: IotDevice[] } | null> {
 export function fetchOverview(): Promise<IotOverview | null> {
   return request(`${BASE}/overview`);
 }
-export function fetchAlerts(): Promise<{ alerts: IotAlert[] } | null> {
+export function fetchAlerts(): Promise<{ alerts: IotAlert[]; total?: number } | null> {
   return request(`${BASE}/alerts`);
+}
+
+/** 分页查询告警（数据库） */
+export function queryAlerts(q: AlertQuery = {}): Promise<AlertPage | null> {
+  const params = new URLSearchParams();
+  params.set("page", String(q.page ?? 1));
+  params.set("pageSize", String(q.pageSize ?? 20));
+  if (q.status && q.status !== "all") params.set("status", q.status);
+  if (q.level && q.level !== "all") params.set("level", q.level);
+  if (q.deviceId) params.set("deviceId", q.deviceId);
+  if (q.keyword) params.set("keyword", q.keyword);
+  if (q.from) params.set("from", String(q.from));
+  if (q.to) params.set("to", String(q.to));
+  return request(`${BASE}/alerts?${params.toString()}`);
+}
+
+/** 告警统计 */
+export function fetchAlertStats(): Promise<{ ok: boolean; stats: AlertStats } | null> {
+  return request(`${BASE}/alerts/stats`);
+}
+
+/** 批量确认（按 id 列表，或 all=true 确认全部未处理） */
+export function ackAlertsBatch(ids: string[] | null): Promise<{ ok: boolean; acked: number } | null> {
+  const url = ids ? `${BASE}/alerts/ack-batch` : `${BASE}/alerts/ack-batch?all=1`;
+  return request(url, { method: "PUT", body: ids ? JSON.stringify({ ids }) : undefined });
 }
 export function addDevice(device: Partial<IotDevice>): Promise<{ device: IotDevice } | null> {
   return request(`${BASE}/devices`, { method: "POST", body: JSON.stringify({ device }) });
@@ -162,6 +215,35 @@ export function writeDevicePoint(
   });
 }
 /** 设备最近采集数据（曲线用） */
-export function fetchDeviceLive(id: string): Promise<{ device: IotDevice; history: any[] } | null> {
-  return request(`${BASE}/devices/${encodeURIComponent(id)}/live`);
+export function fetchDeviceLive(
+  id: string,
+  opts?: { from?: number; to?: number; limit?: number; bucketMs?: number },
+): Promise<{ device: IotDevice; history: any[]; source?: string } | null> {
+  const p = new URLSearchParams();
+  if (opts?.from) p.set("from", String(opts.from));
+  if (opts?.to) p.set("to", String(opts.to));
+  if (opts?.limit) p.set("limit", String(opts.limit));
+  if (opts?.bucketMs) p.set("bucketMs", String(opts.bucketMs));
+  const qs = p.toString();
+  return request(`${BASE}/devices/${encodeURIComponent(id)}/live${qs ? `?${qs}` : ""}`);
+}
+
+/** 采集数据统计（运维用） */
+export function fetchPointStats(): Promise<{ ok: boolean; stats: any } | null> {
+  return request(`${BASE}/points/stats`);
+}
+
+/** 物联网运维设置 */
+export function fetchIotSettings(): Promise<{ ok: boolean; retentionDays: number; stats?: any } | null> {
+  return request(`${BASE}/settings`);
+}
+
+/** 修改数据留存天数 */
+export function updateIotSettings(retentionDays: number): Promise<{ ok: boolean; retentionDays: number } | null> {
+  return request(`${BASE}/settings`, { method: "PUT", body: JSON.stringify({ retentionDays }) });
+}
+
+/** 导出采集数据 CSV（按设备与时间范围） */
+export function exportPointsCsv(deviceId: string, from: number, to: number): string {
+  return `${BASE}/points/export.csv?deviceId=${encodeURIComponent(deviceId)}&from=${from}&to=${to}`;
 }

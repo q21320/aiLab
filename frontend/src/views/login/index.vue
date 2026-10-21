@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, reactive } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { User, Lock } from "@element-plus/icons-vue";
-import { useUserStore } from "../../stores/user";
+import { useUserStore, ROLE_LABELS } from "../../stores/user";
 
 const router = useRouter();
+const route = useRoute();
 const userStore = useUserStore();
 
 const formRef = ref<FormInstance>();
@@ -14,7 +15,8 @@ const loading = ref(false);
 
 const form = reactive({
   username: "admin",
-  password: "123456",
+  // 修正：原默认值是 123456，与实际口令 admin123 不符，导致开箱即报「用户名或密码错误」
+  password: "admin123",
 });
 
 const rules: FormRules = {
@@ -25,14 +27,17 @@ const rules: FormRules = {
 function handleLogin() {
   formRef.value?.validate(async (valid) => {
     if (!valid) return;
+    if (loading.value) return;
     loading.value = true;
-    const ok = await userStore.login(form.username, form.password);
+    const res = await userStore.login(form.username, form.password);
     loading.value = false;
-    if (ok) {
-      ElMessage.success(`登录成功：${userStore.name}（${userStore.role === "admin" ? "管理员" : userStore.role === "operator" ? "工程师" : "访客"}）`);
-      router.push("/dashboard");
+    if (res.ok) {
+      ElMessage.success(`登录成功：${userStore.name}（${ROLE_LABELS[userStore.role]}）`);
+      // 登录后回跳到被拦截的目标页（原先固定跳 dashboard，深链丢失）
+      const redirect = typeof route.query.redirect === "string" ? route.query.redirect : "";
+      router.replace(redirect && redirect.startsWith("/") ? redirect : "/dashboard");
     } else {
-      ElMessage.error("用户名或密码错误");
+      ElMessage.error(res.error || "用户名或密码错误");
     }
   });
 }
@@ -42,7 +47,7 @@ function handleLogin() {
   <div class="login-container">
     <div class="login-box">
       <div class="login-header">
-        <h2>SaaS 管理后台</h2>
+        <h2>实验室数字化管理平台</h2>
         <p>欢迎回来，请登录你的账号</p>
       </div>
       <el-form
@@ -78,7 +83,7 @@ function handleLogin() {
       <div class="login-tip">
         演示账号（三级权限）：admin / admin123（管理员）· engineer / eng123（工程师）· viewer / view123（访客）
       </div>
-      <div class="login-tip">密码以 SHA-256 散列存储，操作均写入审计日志</div>
+      <div class="login-tip">密码由服务端校验（SHA-256 散列存储），操作均写入审计日志</div>
     </div>
   </div>
 </template>

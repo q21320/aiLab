@@ -116,15 +116,24 @@ function removeWidget(id: string) {
   if (selectedId.value === id) selectedId.value = "";
 }
 
+/** 按下时记录的待置顶元素：只有真正拖动后才生效 */
+let pendingFrontId = "";
+let dragMoved = false;
+
 function bringToFront(id: string) {
   const w = screen.value.widgets.find((x) => x.id === id);
   if (!w) return;
-  w.z = screen.value.widgets.reduce((m, x) => Math.max(m, x.z), 0) + 10;
+  // 归一化：按当前层级排序后重排 z = index，避免反复点击导致 z 无限膨胀
+  const ordered = [...screen.value.widgets].sort((a, b) => a.z - b.z).filter((x) => x.id !== id);
+  ordered.push(w);
+  ordered.forEach((x, i) => (x.z = i));
 }
 function sendToBack(id: string) {
   const w = screen.value.widgets.find((x) => x.id === id);
   if (!w) return;
-  w.z = screen.value.widgets.reduce((m, x) => Math.min(m, x.z), 9999) - 10;
+  const ordered = [...screen.value.widgets].sort((a, b) => a.z - b.z).filter((x) => x.id !== id);
+  ordered.unshift(w);
+  ordered.forEach((x, i) => (x.z = i));
 }
 
 // ---------------------------------------------------------------------------
@@ -166,8 +175,10 @@ const gesture = reactive({
 
 function onWidgetMouseDown(ev: MouseEvent, w: ScreenWidget) {
   if (ev.button !== 0) return;
+  // 修复：原先单击就 bringToFront()，会改写 z 并触发 deep watch 把整份 schema 写回 store，
+  // "只是点一下" 也会被认为是修改。这里只记录待处理状态，真正移动超过阈值后才置顶。
   selectedId.value = w.id;
-  bringToFront(w.id);
+  pendingFrontId = w.id;
   gesture.mode = "move";
   gesture.id = w.id;
   gesture.startX = ev.clientX;
@@ -198,6 +209,16 @@ function onWindowMouseMove(ev: MouseEvent) {
   if (!gesture.id) return;
   const w = screen.value.widgets.find((x) => x.id === gesture.id);
   if (!w) return;
+  // 位移阈值：超过 2px 才算真正开始拖动（此时才置顶并标记为已修改）
+  if (!dragMoved) {
+    const px = Math.abs(ev.clientX - gesture.startX) + Math.abs(ev.clientY - gesture.startY);
+    if (px < 2) return;
+    dragMoved = true;
+    if (pendingFrontId) {
+      bringToFront(pendingFrontId);
+      pendingFrontId = "";
+    }
+  }
   const dx = (ev.clientX - gesture.startX) / scale.value;
   const dy = (ev.clientY - gesture.startY) / scale.value;
   if (gesture.mode === "move") {
@@ -215,12 +236,22 @@ function onWindowMouseMove(ev: MouseEvent) {
 function onWindowMouseUp() {
   gesture.id = "";
   gesture.mode = "";
+  pendingFrontId = "";
+  dragMoved = false;
+  // 拖拽结束立即落盘（原先要等 800ms 防抖，期间刷新会丢失位置）
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = undefined;
+  }
+  store.saveProject("screen", clone(screen.value));
+  savedAt.value = new Date().toLocaleTimeString();
 }
 
 function onKeydown(e: KeyboardEvent) {
   const t = e.target as HTMLElement;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-  if ((e.key === "Delete" || e.key === "Backspace") && selectedId.value) {
+  // Backspace 容易被误触（焦点在按钮/标签上时），只在 Delete 键时删除
+  if (e.key === "Delete" && selectedId.value) {
     e.preventDefault();
     removeWidget(selectedId.value);
   }
@@ -315,7 +346,7 @@ watch(
 );
 
 function resetExample() {
-  screen.value = clone(defaultScreenSchema());
+  screen.value = { ...clone(defaultScreenSchema()), id: uid("screen") };
   selectedId.value = "";
   ElMessage.success("已恢复示例大屏");
 }

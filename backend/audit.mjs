@@ -1,233 +1,255 @@
 // ============================================================================
-// 操作日志（审计）· 后端持久化
-//
-// 设计要点（对标 4.8 存储≥3年 / 4.9 操作日志）：
-//   · 不再限制条数：按月写入 JSONL 追加文件 backend/data/audit/audit-YYYY-MM.jsonl
-//   · 查询支持 分页 + 模块/角色/用户/关键字/时间范围 过滤，跨月自动合并读取
-//   · 导出 CSV、按范围清理、留存策略（默认保留 36 个月，超期归档文件不自动删除，
-//     仅当显式调用清理且超过留存期时才会移除）
+// 操作日志（审计）· PostgreSQL 实现
 //
 // 接口：
-//   POST   /api/audit/logs            批量写入 [{module,action,detail,user,role,time}]
-//   GET    /api/audit/logs            分页查询（?page&pageSize&module&role&user&keyword&from&to）
-//   GET    /api/audit/logs/export.csv 按同样条件导出
-//   GET    /api/audit/stats           统计（总数/今日/按模块 Top）
-//   DELETE /api/audit/logs            清理（?before=时间戳 或 all=1）
+//   POST   /api/audit/logs              写入（支持单条或批量，身份由服务端会话推导）
+//   GET    /api/audit/logs              分页查询（模块/角色/用户/关键字/时间范围）
+//   GET    /api/audit/logs/export.csv   按同样条件导出
+//   GET    /api/audit/stats             统计（总数/今日/按模块）
+//   DELETE /api/audit/logs              清理（?all=1 或 ?before=<时间戳>）
+//
+// 相比原 JSONL 实现的改进：
+//   · 分页在数据库完成（LIMIT/OFFSET + time 索引），不再把 36 个月全部读进内存排序；
+//   · 统计用聚合查询，几十万条也不会阻塞事件循环；
+//   · 并发写入天然安全（原来 appendFileSync 在大并发下可能交错）。
 // ============================================================================
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { csvText } from "./csv.mjs";
 
-const RETENTION_MONTHS = 36; // 留存 3 年
+/** 默认留存月数（仅用于展示与清理策略说明） */
+const RETENTION_MONTHS = 36;
 
-function monthKey(ts) {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
+export function createAuditRoutes({ sendJSON, readBody, db, dataDir, getActor }) {
+  const { query } = db;
 
-export function createAuditRoutes({ sendJSON, readBody, dataDir }) {
-  const dir = join(dataDir, "audit");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-  const fileOf = (m) => join(dir, `audit-${m}.jsonl`);
-
-  function monthsInRange(from, to) {
-    const out = [];
-    const start = new Date(from || Date.now() - 30 * 86400000);
-    const end = new Date(to || Date.now());
-    const cur = new Date(start.getFullYear(), start.getMonth(), 1);
-    while (cur <= end) {
-      out.push(monthKey(cur.getTime()));
-      cur.setMonth(cur.getMonth() + 1);
-    }
-    return Array.from(new Set(out));
+  /** 规范化单条日志：去掉换行避免破坏展示，截断超长字段 */
+  function normalize(raw, actor) {
+    const clean = (v, max) =>
+      String(v == null ? "" : v)
+        .replace(/[\r\n]+/g, " ")
+        .slice(0, max);
+    return {
+      time: typeof raw.time === "number" && raw.time > 0 ? raw.time : Date.now(),
+      // 身份优先取服务端会话，客户端自报的值不可信
+      username: clean(actor?.name || raw.user || "系统", 64),
+      role: clean(actor?.role || raw.role || "viewer", 16),
+      module: clean(raw.module || "其他", 32),
+      action: clean(raw.action || "", 64),
+      detail: clean(raw.detail || "", 500),
+    };
   }
 
-  function allMonthFiles() {
+  /** 服务端直接写日志（登录/权限变更等），actor 必传 */
+  async function log(entry, actor) {
     try {
-      return readdirSync(dir)
-        .filter((f) => /^audit-\d{4}-\d{2}\.jsonl$/.test(f))
-        .sort()
-        .reverse(); // 最新在前
-    } catch {
-      return [];
+      const e = normalize(entry, actor);
+      await query(
+        `INSERT INTO audit_logs (time, username, role, module, action, detail) VALUES ($1,$2,$3,$4,$5,$6)`,
+        [e.time, e.username, e.role, e.module, e.action, e.detail],
+      );
+      return true;
+    } catch (err) {
+      console.error("[audit] 写入失败：", err.message);
+      return false;
     }
   }
 
-  /** 读取（可限定月份）并过滤 */
-  function query({ module, role, user, keyword, from, to }) {
-    const files = from || to ? monthsInRange(from, to).map((m) => `audit-${m}.jsonl`) : allMonthFiles();
-    const rows = [];
-    for (const f of files) {
-      const full = join(dir, f);
-      if (!existsSync(full)) continue;
-      const text = readFileSync(full, "utf-8");
-      for (const line of text.split("\n")) {
-        if (!line.trim()) continue;
-        let e;
-        try {
-          e = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (from && e.time < from) continue;
-        if (to && e.time > to) continue;
-        if (module && e.module !== module) continue;
-        if (role && e.role !== role) continue;
-        if (user && !String(e.user || "").includes(user)) continue;
-        if (keyword) {
-          const k = keyword.toLowerCase();
-          const hit = [e.action, e.detail, e.user, e.module].some((v) =>
-            String(v || "").toLowerCase().includes(k)
-          );
-          if (!hit) continue;
-        }
-        rows.push(e);
-      }
+  /** 把查询参数拼成 WHERE 子句（参数化，防注入） */
+  function buildWhere({ module, role, user, keyword, from, to }) {
+    const conds = [];
+    const params = [];
+    const add = (sql, val) => {
+      params.push(val);
+      conds.push(sql.replace("?", `$${params.length}`));
+    };
+    if (from) add("time >= ?", from);
+    if (to) add("time <= ?", to);
+    if (module) add("module = ?", module);
+    if (role) add("role = ?", role);
+    if (user) add("username ILIKE ?", `%${user}%`);
+    if (keyword) {
+      const like = `%${keyword}%`;
+      params.push(like, like, like, like);
+      const n = params.length;
+      conds.push(`(action ILIKE $${n - 3} OR detail ILIKE $${n - 2} OR username ILIKE $${n - 1} OR module ILIKE $${n})`);
     }
-    rows.sort((a, b) => (b.time || 0) - (a.time || 0));
-    return rows;
+    return { where: conds.length ? `WHERE ${conds.join(" AND ")}` : "", params };
+  }
+
+  const toRow = (r) => ({
+    time: Number(r.time),
+    user: r.username,
+    role: r.role,
+    module: r.module,
+    action: r.action,
+    detail: r.detail,
+  });
+
+  /** 分页查询（数据库内完成分页） */
+  async function queryPage(opts) {
+    const { where, params } = buildWhere(opts);
+    const pageSize = Math.min(Math.max(Number(opts.pageSize) || 20, 1), 500);
+    const page = Math.max(Number(opts.page) || 1, 1);
+    const offset = (page - 1) * pageSize;
+
+    const totalRes = await query(`SELECT COUNT(*)::int AS n FROM audit_logs ${where}`, params);
+    const listRes = await query(
+      `SELECT time, username, role, module, action, detail
+         FROM audit_logs ${where}
+         ORDER BY time DESC, id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset],
+    );
+    return { rows: listRes.rows.map(toRow), total: totalRes.rows[0].n, page, pageSize };
+  }
+
+  /** 导出用：不分页但设上限，避免一次拉爆内存 */
+  async function queryAll(opts, limit = 100000) {
+    const { where, params } = buildWhere(opts);
+    const r = await query(
+      `SELECT time, username, role, module, action, detail FROM audit_logs ${where}
+        ORDER BY time DESC, id DESC LIMIT $${params.length + 1}`,
+      [...params, limit],
+    );
+    return r.rows.map(toRow);
   }
 
   function csvOf(rows) {
-    const esc = (v) => {
-      const s = v === null || v === undefined ? "" : String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const header = "时间,用户,角色,模块,操作,详情";
-    return (
-      "\uFEFF" +
-      [header, ...rows.map((r) => [new Date(r.time).toLocaleString("zh-CN"), r.user, r.role, r.module, r.action, esc(r.detail)].join(","))].join("\n")
+    // 全字段转义 + 防公式注入
+    return csvText(
+      ["时间", "用户", "角色", "模块", "操作", "详情"],
+      rows.map((r) => [new Date(r.time).toLocaleString("zh-CN"), r.user, r.role, r.module, r.action, r.detail]),
     );
   }
 
-  return async function handle(req, res, path, method) {
-    // 写入（支持单条或批量）
+  function parseQuery(url) {
+    return {
+      module: url.searchParams.get("module") || undefined,
+      role: url.searchParams.get("role") || undefined,
+      user: url.searchParams.get("user") || undefined,
+      keyword: url.searchParams.get("keyword") || undefined,
+      from: Number(url.searchParams.get("from")) || undefined,
+      to: Number(url.searchParams.get("to")) || undefined,
+      page: Number(url.searchParams.get("page")) || 1,
+      pageSize: Number(url.searchParams.get("pageSize")) || 20,
+    };
+  }
+
+  async function handle(req, res, path, method) {
+    // 身份一律由服务端会话推导（getActor 可能是异步的）
+    const actor = typeof getActor === "function" ? await getActor(req) : null;
+
+    // ---------------- 写入（支持单条或批量） ----------------
     if (method === "POST" && path === "/api/audit/logs") {
+      let body;
       try {
-        const body = await readBody(req);
-        const list = Array.isArray(body.logs) ? body.logs : body.log ? [body.log] : [];
-        if (!list.length) {
-          sendJSON(res, 400, { ok: false, error: "缺少 logs 数组" });
-          return true;
-        }
-        const byMonth = new Map();
-        for (const raw of list) {
-          const entry = {
-            time: Number(raw.time) || Date.now(),
-            user: String(raw.user || "系统"),
-            role: String(raw.role || "viewer"),
-            module: String(raw.module || "其他"),
-            action: String(raw.action || ""),
-            detail: String(raw.detail || ""),
-          };
-          const m = monthKey(entry.time);
-          if (!byMonth.has(m)) byMonth.set(m, []);
-          byMonth.get(m).push(JSON.stringify(entry));
-        }
-        for (const [m, lines] of byMonth) {
-          appendFileSync(fileOf(m), lines.join("\n") + "\n", "utf-8");
-        }
-        sendJSON(res, 200, { ok: true, saved: list.length });
+        body = await readBody(req);
       } catch {
         sendJSON(res, 400, { ok: false, error: "请求体 JSON 解析失败" });
+        return true;
+      }
+      const list = Array.isArray(body.logs) ? body.logs : body.log ? [body.log] : [];
+      if (!list.length) {
+        sendJSON(res, 400, { ok: false, error: "缺少 logs 数组" });
+        return true;
+      }
+      const entries = list.slice(0, 200).map((raw) => normalize(raw, actor));
+      const params = [];
+      const tuples = entries.map((e, i) => {
+        const b = i * 6;
+        params.push(e.time, e.username, e.role, e.module, e.action, e.detail);
+        return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6})`;
+      });
+      try {
+        await query(`INSERT INTO audit_logs (time, username, role, module, action, detail) VALUES ${tuples.join(",")}`, params);
+        sendJSON(res, 200, { ok: true, saved: entries.length });
+      } catch (e) {
+        console.error("[audit] 批量写入失败：", e.message);
+        sendJSON(res, 500, { ok: false, error: "日志写入失败" });
       }
       return true;
     }
 
-    // 导出 CSV
+    // ---------------- 导出 CSV ----------------
     if (method === "GET" && path === "/api/audit/logs/export.csv") {
       const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-      const rows = query({
-        module: url.searchParams.get("module") || undefined,
-        role: url.searchParams.get("role") || undefined,
-        user: url.searchParams.get("user") || undefined,
-        keyword: url.searchParams.get("keyword") || undefined,
-        from: Number(url.searchParams.get("from")) || undefined,
-        to: Number(url.searchParams.get("to")) || undefined,
-      });
-      res.writeHead(200, {
-        "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="audit-logs.csv"`,
-        "Access-Control-Allow-Origin": "*",
-      });
-      res.end(csvOf(rows));
+      try {
+        const rows = await queryAll(parseQuery(url));
+        res.writeHead(200, {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="audit-logs.csv"`,
+        });
+        res.end(csvOf(rows));
+      } catch (e) {
+        console.error("[audit] 导出失败：", e.message);
+        sendJSON(res, 500, { error: "导出失败" });
+      }
       return true;
     }
 
-    // 统计
+    // ---------------- 统计 ----------------
     if (method === "GET" && path === "/api/audit/stats") {
-      const rows = query({});
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const byModule = {};
-      for (const r of rows) byModule[r.module] = (byModule[r.module] || 0) + 1;
-      sendJSON(res, 200, {
-        total: rows.length,
-        today: rows.filter((r) => r.time >= today.getTime()).length,
-        byModule,
-        files: allMonthFiles(),
-        retentionMonths: RETENTION_MONTHS,
-        dir,
-      });
+      try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const [totalRes, todayRes, byModuleRes] = await Promise.all([
+          query("SELECT COUNT(*)::int AS n FROM audit_logs"),
+          query("SELECT COUNT(*)::int AS n FROM audit_logs WHERE time >= $1", [today.getTime()]),
+          query("SELECT module, COUNT(*)::int AS n FROM audit_logs GROUP BY module ORDER BY n DESC"),
+        ]);
+        const byModule = {};
+        for (const r of byModuleRes.rows) byModule[r.module] = r.n;
+        sendJSON(res, 200, {
+          total: totalRes.rows[0].n,
+          today: todayRes.rows[0].n,
+          byModule,
+          storage: "PostgreSQL",
+          retentionMonths: RETENTION_MONTHS,
+        });
+      } catch (e) {
+        console.error("[audit] 统计失败：", e.message);
+        sendJSON(res, 500, { error: "统计失败" });
+      }
       return true;
     }
 
-    // 清理
+    // ---------------- 清理 ----------------
     if (method === "DELETE" && path === "/api/audit/logs") {
       const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
       const all = url.searchParams.get("all") === "1";
       const before = Number(url.searchParams.get("before")) || 0;
-      let removed = 0;
-      for (const f of allMonthFiles()) {
-        const full = join(dir, f);
-        const text = readFileSync(full, "utf-8");
-        const lines = text.split("\n").filter((l) => l.trim());
-        if (all) {
-          removed += lines.length;
-          writeFileSync(full, "", "utf-8");
-          continue;
-        }
-        if (!before) continue;
-        const keep = [];
-        for (const l of lines) {
-          try {
-            const e = JSON.parse(l);
-            if (e.time < before) removed += 1;
-            else keep.push(l);
-          } catch {
-            /* 丢弃坏行 */
-          }
-        }
-        writeFileSync(full, keep.length ? keep.join("\n") + "\n" : "", "utf-8");
+      if (!all && !before) {
+        sendJSON(res, 400, { error: "请指定 ?all=1 或 ?before=<时间戳>" });
+        return true;
       }
-      sendJSON(res, 200, { ok: true, removed });
+      try {
+        const r = all
+          ? await query("DELETE FROM audit_logs")
+          : await query("DELETE FROM audit_logs WHERE time < $1", [before]);
+        sendJSON(res, 200, { ok: true, removed: r.rowCount });
+      } catch (e) {
+        console.error("[audit] 清理失败：", e.message);
+        sendJSON(res, 500, { error: "清理失败" });
+      }
       return true;
     }
 
-    // 分页查询
+    // ---------------- 分页查询 ----------------
     if (method === "GET" && path === "/api/audit/logs") {
       const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-      const page = Math.max(1, Number(url.searchParams.get("page") || 1));
-      const pageSize = Math.min(500, Math.max(1, Number(url.searchParams.get("pageSize") || 20)));
-      const rows = query({
-        module: url.searchParams.get("module") || undefined,
-        role: url.searchParams.get("role") || undefined,
-        user: url.searchParams.get("user") || undefined,
-        keyword: url.searchParams.get("keyword") || undefined,
-        from: Number(url.searchParams.get("from")) || undefined,
-        to: Number(url.searchParams.get("to")) || undefined,
-      });
-      const start = (page - 1) * pageSize;
-      sendJSON(res, 200, {
-        logs: rows.slice(start, start + pageSize),
-        total: rows.length,
-        page,
-        pageSize,
-      });
+      try {
+        const { rows, total, page, pageSize } = await queryPage(parseQuery(url));
+        sendJSON(res, 200, { logs: rows, total, page, pageSize });
+      } catch (e) {
+        console.error("[audit] 查询失败：", e.message);
+        sendJSON(res, 500, { error: "查询失败", logs: [], total: 0 });
+      }
       return true;
     }
 
     return false;
-  };
+  }
+
+  handle.log = log;
+  return handle;
 }

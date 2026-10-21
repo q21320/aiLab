@@ -72,9 +72,18 @@ const drag = ref({ active: false, woId: "", dx: 0, dy: 0, lineIdx: 0 });
 const selectedId = ref("");
 const svgRef = ref<SVGSVGElement | null>(null);
 
+/**
+ * 鼠标坐标 → SVG viewBox 坐标。
+ *
+ * 修复：原实现对 x 乘 `TOTAL_W / rect.width`，但落点时又把 viewBox 单位的 dx 当 CSS 像素
+ * 再除以 PPH，单位混用导致拖拽位置成倍偏移（容器越窄偏得越多）。
+ * 现在统一在 **viewBox 坐标系** 内计算：px 与 barX()/PPH 同单位，落点公式
+ *   start = dayStart + (x_viewBox / PPH) * 3600000
+ * 才与渲染位置严格一致。
+ */
 function toCanvas(ev: MouseEvent): { x: number; y: number } {
   const rect = svgRef.value?.getBoundingClientRect();
-  if (!rect) return { x: 0, y: 0 };
+  if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
   const sx = TOTAL_W / rect.width;
   const sy = (HEAD_H + props.lines.length * ROW_H) / rect.height;
   return { x: (ev.clientX - rect.left) * sx, y: (ev.clientY - rect.top) * sy };
@@ -112,7 +121,8 @@ function onBarMouseUp(ev: MouseEvent) {
   const wo = props.workOrders.find((w) => w.id === drag.value.woId);
   if (wo) {
     const pt = toCanvas(ev);
-    const x = pt.x - drag.value.dx;
+    // dx 与 pt 同为 viewBox 单位，相减后就是工单条新的左边距（px 单位与 PPH 一致）
+    const x = Math.max(0, pt.x - drag.value.dx);
     const start = dayStart + (x / PPH) * 3600000;
     const line = props.lines[Math.max(0, Math.min(props.lines.length - 1, drag.value.lineIdx))];
     if (line) emit("move", { woId: wo.id, lineId: line.id, start });

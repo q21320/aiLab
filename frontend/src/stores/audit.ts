@@ -37,6 +37,8 @@ export const useAuditStore = defineStore("audit", {
     /** 服务端日志总数 */
     serverTotal: 0,
     flushing: false,
+    /** 进行中的冲刷 Promise（并发调用复用同一个请求） */
+    pendingFlush: null as Promise<void> | null,
   }),
   getters: {
     /** 兼容旧用法：当前可见条数（服务端模式下为服务端总数） */
@@ -70,23 +72,37 @@ export const useAuditStore = defineStore("audit", {
       void this.flush();
     },
 
-    /** 把本地缓冲批量提交到后端（成功后清空缓冲） */
+    /**
+     * 把本地缓冲批量提交到后端。
+     * 修复：原实现成功后 `this.entries = []` 会把「等待网络期间新写入的日志」一并清掉；
+     * 这里先快照本批要发的条目，成功后只移除这些条目（按对象引用比对），
+     * 并保证并发调用复用同一个进行中的请求，避免同时发出两份重复日志。
+     */
     async flush() {
-      if (this.flushing) return;
-      if (!this.entries.length && localStorage.getItem(FLUSHED_FLAG) === "1") return;
+      if (this.flushing) return this.pendingFlush;
+      if (!this.entries.length) return;
       this.flushing = true;
-      try {
-        const batch = [...this.entries].reverse();
-        const ok = batch.length ? await pushLogs(batch) : true;
-        this.backendOnline = ok;
-        if (ok) {
-          this.entries = [];
-          this.persistLocal();
-          localStorage.setItem(FLUSHED_FLAG, "1");
+      this.pendingFlush = (async () => {
+        try {
+          // 本批快照：只发送发起时刻已存在的条目
+          const batch = [...this.entries].reverse();
+          const ok = await pushLogs(batch);
+          this.backendOnline = ok;
+          if (ok) {
+            // 只移除已成功提交的条目，期间新 log() 写入的会保留在缓冲中
+            const sent = new Set(batch);
+            this.entries = this.entries.filter((e) => !sent.has(e));
+            this.persistLocal();
+            localStorage.setItem(FLUSHED_FLAG, "1");
+          }
+        } finally {
+          this.flushing = false;
         }
-      } finally {
-        this.flushing = false;
-      }
+      })();
+      const p = this.pendingFlush;
+      await p;
+      // 发送期间若又有新日志写入，继续冲刷
+      if (!this.flushing && this.entries.length && this.backendOnline) await this.flush();
     },
 
     /** 初始化：检测后端并补传离线日志 */

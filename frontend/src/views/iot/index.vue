@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Delete, Connection, Search, VideoPlay, Setting, Refresh, Cpu } from "@element-plus/icons-vue";
 import {
@@ -18,17 +19,82 @@ import {
   type IotPointDef,
 } from "../../api/iot";
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
+import { exportPointsCsv, fetchIotSettings, updateIotSettings } from "../../api/iot";
+import { Download } from "@element-plus/icons-vue";
 import { echarts, chartOption } from "../../lowcode/charts";
 
 startIotLive();
-onMounted(() => {
+onMounted(async () => {
   loadDrivers();
   refreshSimulator();
+  // 从告警页跳转过来时自动打开对应设备的曲线并定位时间点
+  await applyJumpQuery();
 });
 
 const drivers = ref<DriverDef[]>([]);
 const simulator = ref<any>(null);
 const devices = computed<IotDevice[]>(() => iotLive.devices as IotDevice[]);
+
+// 从告警页跳转：/iot?device=DEV-001&time=<毫秒时间戳> 自动打开该设备曲线并定位到告警时刻
+const route = useRoute();
+const router = useRouter();
+const jumpHandled = ref(false);
+async function applyJumpQuery() {
+  if (jumpHandled.value) return;
+  const devId = String(route.query.device || "");
+  const t = Number(route.query.time) || 0;
+  if (!devId || !t) return;
+  jumpHandled.value = true;
+  // 等待设备列表通过 SSE / 接口加载完成（最多 4 秒）
+  for (let i = 0; i < 20 && !devices.value.length; i++) await new Promise((r) => setTimeout(r, 200));
+  const dev = devices.value.find((d) => d.id === devId);
+  if (dev) {
+    await openChart(dev, t);
+    router.replace({ path: "/iot" });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 采集数据导出 / 留存设置
+// ---------------------------------------------------------------------------
+function exportCurrentChart() {
+  if (!chartDevice.value) return;
+  const rangeMin = chartRange.value || 60;
+  const center = chartFocusTime.value || Date.now();
+  const from = center - rangeMin * 60_000;
+  const to = chartFocusTime.value ? center + 5 * 60_000 : Date.now();
+  const url = exportPointsCsv(chartDevice.value.id, from, to);
+  // 用 Cookie 会话下载，避免新窗口丢失认证
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  a.target = "_blank";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  ElMessage.success("正在导出 CSV（浏览器将开始下载）");
+}
+
+const settingsVisible = ref(false);
+const retentionDays = ref(90);
+const pointStats = ref<any>(null);
+async function openSettings() {
+  settingsVisible.value = true;
+  const res = await fetchIotSettings();
+  if (res) {
+    retentionDays.value = res.retentionDays ?? 90;
+    pointStats.value = res.stats || null;
+  }
+}
+async function saveSettings() {
+  const res = await updateIotSettings(retentionDays.value);
+  if (res?.ok) {
+    ElMessage.success(`留存期已更新为 ${res.retentionDays} 天`);
+    settingsVisible.value = false;
+  } else {
+    ElMessage.error("设置失败，需工程师及以上权限");
+  }
+}
 
 async function loadDrivers() {
   const res = await fetchDrivers();
@@ -70,6 +136,8 @@ const deviceForm = ref<{
   protocol: string;
   address: Record<string, any>;
   points: IotPointDef[];
+  pollIntervalMs: number;
+  pollEnabled: boolean;
 }>({
   id: "",
   name: "",
@@ -78,6 +146,8 @@ const deviceForm = ref<{
   protocol: "scpi",
   address: {},
   points: [],
+  pollIntervalMs: 10000,
+  pollEnabled: true,
 });
 
 const currentDriver = computed(() => drivers.value.find((d) => d.id === deviceForm.value.protocol));
@@ -92,6 +162,8 @@ function openAdd() {
     protocol: "scpi",
     address: {},
     points: [],
+    pollIntervalMs: 10000,
+    pollEnabled: true,
   };
   applyDefaults();
   applyTemplate("scpi");
@@ -190,19 +262,100 @@ async function doRead(device: IotDevice) {
 const writeVisible = ref(false);
 const writeForm = ref<{ deviceId: string; key: string; value: number | string }>({ deviceId: "", key: "", value: 0 });
 const writeDevicePoints = ref<IotPointDef[]>([]);
-function openWrite(device: IotDevice) {
+const writeDevice = ref<IotDevice | null>(null);
+const writeSending = ref(false);
+
+/**
+ * 下发结果（用于界面上"看得出到底成功没有"）。
+ * 关键点：命令发送成功 ≠ 设定值已生效。
+ * 环境箱这类设备有热惯性，设定 85℃ 后实测值是逐步爬升的，
+ * 因此这里展示「下发前值 → 下发后回读值 → 目标值」，并给出明确判定。
+ */
+interface WriteOutcome {
+  ok: boolean;
+  command: string;
+  target: number;
+  before: number | null;
+  after: number | null;
+  afterAt: number;
+  raw: string;
+  error: string;
+}
+const writeOutcome = ref<WriteOutcome | null>(null);
+const writeError = ref("");
+
+async function openWrite(device: IotDevice) {
+  writeDevice.value = device;
   writeDevicePoints.value = (device.points || []).filter((p) => p.command || p.register !== undefined);
   writeForm.value = { deviceId: device.id, key: writeDevicePoints.value[0]?.key || "", value: 30 };
+  writeOutcome.value = null;
+  writeError.value = "";
   writeVisible.value = true;
+  // 打开时先读一次当前值，给用户一个"下发前"的基准
+  void refreshWriteBaseline();
 }
-async function doWrite() {
-  const res = await writeDevicePoint(writeForm.value.deviceId, writeForm.value.key, writeForm.value.value);
-  if (res?.ok) {
-    ElMessage.success(`下发成功：${writeForm.value.key} = ${writeForm.value.value}`);
-    writeVisible.value = false;
-  } else {
-    ElMessage.error(res?.error || "下发失败");
+
+async function refreshWriteBaseline() {
+  const id = writeForm.value.deviceId;
+  const key = writeForm.value.key;
+  if (!id || !key) return;
+  const res = await readDevicePoints(id);
+  const v = res?.values?.[key]?.value;
+  if (typeof v === "number") {
+    if (writeOutcome.value) {
+      writeOutcome.value.after = v;
+      writeOutcome.value.afterAt = Date.now();
+    } else {
+      writeBaseline.value = v;
+    }
   }
+}
+const writeBaseline = ref<number | null>(null);
+
+async function doWrite() {
+  if (writeSending.value) return;
+  const target = Number(writeForm.value.value);
+  if (!Number.isFinite(target)) {
+    ElMessage.warning("目标值必须是数字");
+    return;
+  }
+  writeSending.value = true;
+  writeOutcome.value = null;
+  writeError.value = "";
+  try {
+    const res: any = await writeDevicePoint(writeForm.value.deviceId, writeForm.value.key, writeForm.value.value);
+    if (!res?.ok) {
+      // 仪器明确拒绝（如 SCPI 返回 ERROR:...）或通信失败
+      writeError.value = res?.error || "下发失败";
+      ElMessage.error(writeError.value);
+      return;
+    }
+    // 命令已送达。立即回读一次，给用户可验证的实际值。
+    const readBack = await readDevicePoints(writeForm.value.deviceId);
+    const after = readBack?.values?.[writeForm.value.key]?.value;
+    writeOutcome.value = {
+      ok: true,
+      command: res.command || "",
+      target,
+      before: typeof res.before === "number" ? res.before : null,
+      after: typeof after === "number" ? after : null,
+      afterAt: Date.now(),
+      raw: res.result?.raw || "",
+      error: "",
+    };
+    ElMessage.success("指令已下发，已自动回读实测值");
+  } catch (e: any) {
+    writeError.value = e?.message || "下发失败";
+    ElMessage.error(writeError.value);
+  } finally {
+    writeSending.value = false;
+  }
+}
+
+/** 回读值是否已达到目标（环境箱有惯性，可能仍在爬升） */
+function writeSettled(o: WriteOutcome): boolean {
+  if (o.after == null) return false;
+  return Math.abs(o.after - o.target) <= Math.max(0.5, Math.abs(o.target) * 0.02);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,21 +368,49 @@ const chartKey = ref("");
 let chart: ReturnType<typeof echarts.init> | null = null;
 let pollTimer: number | undefined;
 
-async function openChart(device: IotDevice) {
+/** 聚焦时间点：从告警跳转时传入，曲线窗口以该时刻为中心 */
+const chartFocusTime = ref<number>(0);
+
+async function openChart(device: IotDevice, focusTime?: number) {
   chartDevice.value = device;
   chartKey.value = (device.points || [])[0]?.key || "temperature";
+  chartFocusTime.value = Number(focusTime) || 0;
+  // 带焦点时间时默认切到 1 小时历史窗口，便于看到告警前后趋势
+  chartRange.value = chartFocusTime.value ? 60 : 0;
   chartVisible.value = true;
   await new Promise((r) => setTimeout(r, 60));
   renderChart();
   clearInterval(pollTimer);
-  pollTimer = window.setInterval(renderChart, 2000);
+  // 实时模式每 2 秒刷新；历史模式不自动刷新（避免反复查库）
+  if (!chartRange.value) pollTimer = window.setInterval(renderChart, 2000);
 }
+/** 曲线时间范围（分钟）：0 表示实时（内存缓冲），>0 表示查数据库历史 */
+const chartRange = ref<number>(0);
+
 async function renderChart() {
   if (!chartVisible.value || !chartDevice.value || !chartEl.value) return;
   if (!chart) chart = echarts.init(chartEl.value);
-  const res = await fetchDeviceLive(chartDevice.value.id);
+
+  const rangeMin = chartRange.value;
+  // 有焦点时间（从告警跳转）时，窗口以该时刻为中心；否则以当前时刻结束
+  const center = chartFocusTime.value || Date.now();
+  const from = center - rangeMin * 60_000;
+  const to = chartFocusTime.value ? center + 5 * 60_000 : Date.now();
+  const res = rangeMin
+    ? await fetchDeviceLive(chartDevice.value.id, {
+        from,
+        to,
+        limit: 2000,
+        // 长时间跨度自动降采样，避免点太密
+        bucketMs: rangeMin >= 60 ? Math.floor((rangeMin * 60_000) / 200) : undefined,
+      })
+    : await fetchDeviceLive(chartDevice.value.id);
   const history = (res?.history || []) as any[];
-  const labels = history.map((h) => new Date(h.time).toLocaleTimeString("zh-CN", { hour12: false }));
+  const labels = history.map((h) =>
+    rangeMin >= 60
+      ? new Date(h.time).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      : new Date(h.time).toLocaleTimeString("zh-CN", { hour12: false }),
+  );
   const values = history.map((h) => {
     const v = h[chartKey.value];
     return typeof v === "number" ? v : null;
@@ -265,6 +446,10 @@ function addressText(d: IotDevice): string {
   if (a.host) return `${a.host}:${a.port ?? 502}`;
   return "平台内置";
 }
+function fmtClock(t: number): string {
+  return new Date(t).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
 function statusTag(s: string) {
   return s === "online" ? "success" : s === "error" ? "danger" : "info";
 }
@@ -287,8 +472,33 @@ function statusTag(s: string) {
           {{ simulator?.running ? "停止虚拟仪器" : "启动虚拟仪器" }}
         </el-button>
         <el-button @click="refreshAll">刷新设备清单</el-button>
+        <el-button @click="openSettings">数据留存设置</el-button>
       </div>
     </el-card>
+
+    <!-- 数据留存设置 -->
+    <el-dialog v-model="settingsVisible" title="采集数据留存设置" width="520px">
+      <el-form label-width="120px">
+        <el-form-item label="留存天数">
+          <el-input-number v-model="retentionDays" :min="1" :max="3650" :step="30" />
+        </el-form-item>
+      </el-form>
+      <el-alert type="info" :closable="false" show-icon>
+        超过留存期的采集点位会被自动清理（每天执行一次）。历史告警不受此设置影响（告警留存 12 个月）。
+      </el-alert>
+      <div v-if="pointStats" class="stats-box">
+        <div>当前点位总量：<b>{{ pointStats.total }}</b> 条</div>
+        <div>设备数：<b>{{ pointStats.devices }}</b></div>
+        <div>占用空间：<b>{{ pointStats.size }}</b></div>
+        <div v-if="pointStats.oldest">
+          最早数据：<b>{{ new Date(pointStats.oldest).toLocaleString("zh-CN", { hour12: false }) }}</b>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="settingsVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveSettings">保存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 设备列表 -->
     <el-card shadow="never">
@@ -310,9 +520,19 @@ function statusTag(s: string) {
           <template #default="{ row }">{{ addressText(row) }}</template>
         </el-table-column>
         <el-table-column prop="location" label="位置" width="120" />
-        <el-table-column label="状态" width="90">
+        <el-table-column label="状态" width="130">
           <template #default="{ row }">
-            <el-tag size="small" :type="statusTag(row.status)">{{ row.status === "online" ? "在线" : row.status === "error" ? "异常" : "离线" }}</el-tag>
+            <el-tooltip v-if="row.lastError" :content="row.lastError" placement="top">
+              <el-tag size="small" :type="statusTag(row.status)">
+                {{ row.status === "online" ? "在线" : row.status === "error" ? "异常" : "离线" }}
+              </el-tag>
+            </el-tooltip>
+            <el-tag v-else size="small" :type="statusTag(row.status)">
+              {{ row.status === "online" ? "在线" : row.status === "error" ? "异常" : "离线" }}
+            </el-tag>
+            <div v-if="row.lastPollAt" class="poll-time">
+              {{ row.protocol === "mock" || !row.protocol ? "模拟" : `采集 ${fmtClock(row.lastPollAt)}` }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="最近探测" min-width="200">
@@ -358,6 +578,14 @@ function statusTag(s: string) {
         <div v-for="f in currentDriver?.fields || []" :key="f.key" class="form-field">
           <label>{{ f.label }}</label>
           <el-input v-model="deviceForm.address[f.key]" :placeholder="f.placeholder" />
+        </div>
+        <div v-if="deviceForm.protocol !== 'mock'" class="form-field">
+          <label>采集周期（毫秒）</label>
+          <el-input-number v-model="deviceForm.pollIntervalMs" :min="2000" :step="1000" :max="3600000" style="width: 100%" />
+        </div>
+        <div v-if="deviceForm.protocol !== 'mock'" class="form-field">
+          <label>自动采集</label>
+          <el-switch v-model="deviceForm.pollEnabled" active-text="开启" inactive-text="关闭" />
         </div>
       </div>
 
@@ -428,32 +656,189 @@ function statusTag(s: string) {
     </el-dialog>
 
     <!-- 下发控制 -->
-    <el-dialog v-model="writeVisible" title="下发控制（写真实设备）" width="480px">
+    <el-dialog v-model="writeVisible" title="下发控制（写真实设备）" width="560px">
       <div class="form-field">
         <label>控制点位</label>
-        <el-select v-model="writeForm.key" style="width: 100%">
+        <el-select v-model="writeForm.key" style="width: 100%" @change="refreshWriteBaseline">
           <el-option v-for="p in writeDevicePoints" :key="p.key" :label="`${p.label || p.key}（${p.key}）`" :value="p.key" />
         </el-select>
       </div>
       <div class="form-field"><label>目标值</label><el-input v-model="writeForm.value" placeholder="如 60" /></div>
+
+      <!-- 下发前基准 -->
+      <div v-if="!writeOutcome" class="write-baseline">
+        下发前实测值：<b>{{ writeBaseline ?? "—" }}</b>
+        <span class="muted">（打开弹窗时自动读取，用于对比）</span>
+      </div>
+
+      <!-- 下发结果：让人一眼看出成功没有、生效了没有 -->
+      <el-alert v-if="writeError" type="error" :closable="false" show-icon class="mt12">
+        <template #title>下发失败</template>
+        {{ writeError }}
+      </el-alert>
+
+      <div v-if="writeOutcome" class="write-result">
+        <el-alert type="success" :closable="false" show-icon>
+          <template #title>指令已送达设备</template>
+          <code>{{ writeOutcome.command || "（已写入）" }}</code>
+        </el-alert>
+
+        <div class="result-grid">
+          <div class="result-cell">
+            <div class="k">下发前</div>
+            <div class="v">{{ writeOutcome.before ?? "—" }}</div>
+          </div>
+          <div class="result-cell">
+            <div class="k">目标值</div>
+            <div class="v target">{{ writeOutcome.target }}</div>
+          </div>
+          <div class="result-cell">
+            <div class="k">回读实测（{{ new Date(writeOutcome.afterAt).toLocaleTimeString("zh-CN", { hour12: false }) }}）</div>
+            <div class="v" :class="{ ok: writeSettled(writeOutcome), pending: !writeSettled(writeOutcome) }">
+              {{ writeOutcome.after ?? "—" }}
+            </div>
+          </div>
+        </div>
+
+        <el-alert
+          v-if="writeSettled(writeOutcome)"
+          type="success" :closable="false" show-icon class="mt12"
+          title="设定值已生效（回读值与目标一致）"
+        />
+        <el-alert
+          v-else
+          type="warning" :closable="false" show-icon class="mt12"
+        >
+          <template #title>指令已送达，但实测值尚未达到目标</template>
+          环境箱/试验机存在热惯性，温度需要时间爬升，这是正常现象。可点击下方
+          <b>重新回读</b> 查看最新值，或用「曲线」查看趋势。
+        </el-alert>
+
+        <div class="result-actions">
+          <el-button size="small" :icon="Refresh" @click="refreshWriteBaseline">重新回读</el-button>
+          <el-button size="small" @click="openChart(writeDevice!); writeVisible = false">查看曲线</el-button>
+        </div>
+      </div>
+
       <template #footer>
-        <el-button @click="writeVisible = false">取消</el-button>
-        <el-button type="primary" @click="doWrite">下发</el-button>
+        <el-button @click="writeVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="writeSending" @click="doWrite">
+          {{ writeOutcome ? "再次下发" : "下发" }}
+        </el-button>
       </template>
     </el-dialog>
 
     <!-- 实时曲线 -->
     <el-dialog v-model="chartVisible" :title="`实时曲线 · ${chartDevice?.name || ''}`" width="860px" @close="closeChart">
+      <div class="chart-toolbar">
+        <span class="range-label">时间范围：</span>
+        <el-radio-group v-model="chartRange" size="small" @change="openChart(chartDevice!)">
+          <el-radio-button :value="0">实时</el-radio-button>
+          <el-radio-button :value="10">10 分钟</el-radio-button>
+          <el-radio-button :value="60">1 小时</el-radio-button>
+          <el-radio-button :value="1440">24 小时</el-radio-button>
+          <el-radio-button :value="10080">7 天</el-radio-button>
+        </el-radio-group>
+      </div>
       <el-radio-group v-model="chartKey" size="small" style="margin-bottom: 10px" @change="renderChart">
         <el-radio-button v-for="p in chartDevice?.points || []" :key="p.key" :value="p.key">{{ p.label || p.key }}</el-radio-button>
       </el-radio-group>
       <div ref="chartEl" class="live-chart"></div>
-      <p class="tip">数据来自设备真实采集（每 2 秒刷新），同一份数据也进入平台实时流供大屏/仪表盘使用。</p>
+      <el-alert
+        v-if="chartFocusTime"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="focus-alert"
+        :title="`已定位到告警时刻：${new Date(chartFocusTime).toLocaleString('zh-CN', { hour12: false })}（曲线以该时刻为中心）`"
+      />
+      <p class="tip">
+        实时模式读取内存缓冲（每 2 秒刷新）；历史模式查询数据库（支持 10 分钟 ~ 7 天）。
+        采集数据已持久化到 PostgreSQL，重启不丢失。
+      </p>
+      <template #footer>
+        <el-button :icon="Download" @click="exportCurrentChart">导出当前范围 CSV</el-button>
+        <el-button @click="closeChart">关闭</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.stats-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.9;
+  color: #606266;
+}
+.focus-alert {
+  margin-top: 8px;
+}
+.range-label {
+  font-size: 13px;
+  color: #606266;
+}
+.write-baseline {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+.write-baseline b {
+  color: #409eff;
+  font-size: 16px;
+  margin: 0 4px;
+}
+.mt12 {
+  margin-top: 12px;
+}
+.write-result {
+  margin-top: 12px;
+}
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+.result-cell {
+  background: #f5f7fa;
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.result-cell .k {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+.result-cell .v {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+}
+.result-cell .v.target {
+  color: #409eff;
+}
+.result-cell .v.ok {
+  color: #67c23a;
+}
+.result-cell .v.pending {
+  color: #e6a23c;
+}
+.result-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
 .iot-page {
   display: flex;
   flex-direction: column;

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { Monitor, Warning, Operation, Box, ArrowRight, Lock } from "@element-plus/icons-vue";
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
+import { ackAlert } from "../../api/iot";
 import { useProductionStore } from "../../stores/production";
 import { useSampleStore } from "../../stores/samples";
 import { useUserStore, ROLE_LABELS, type UserRole } from "../../stores/user";
@@ -81,7 +82,26 @@ const stats = computed(() => [
   },
 ]);
 
-const recentAlerts = computed(() => iotLive.alerts.slice(0, 5));
+const recentAlerts = computed(() => iotLive.alerts.filter((a) => a.status !== "acked").slice(0, 5));
+
+/** 确认告警（此前后端有接口但前端无处调用，告警只能堆积） */
+const acking = ref<string>("");
+async function ackOne(alert: { id: string }) {
+  if (acking.value) return;
+  acking.value = alert.id;
+  try {
+    const res = await ackAlert(alert.id);
+    if (res?.alert) {
+      const i = iotLive.alerts.findIndex((x) => x.id === alert.id);
+      if (i >= 0) iotLive.alerts[i] = { ...iotLive.alerts[i], ...res.alert };
+      ElMessage.success("已确认该告警");
+    } else {
+      ElMessage.error("确认失败，请检查后端服务");
+    }
+  } finally {
+    acking.value = "";
+  }
+}
 
 function alertType(level: string) {
   return level === "error" ? "danger" : "warning";
@@ -160,10 +180,17 @@ function fmtTime(t: number): string {
             <el-table-column label="时间" width="150">
               <template #default="{ row }">{{ fmtTime(row.time) }}</template>
             </el-table-column>
+            <el-table-column label="操作" width="80" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" :loading="acking === row.id" @click="ackOne(row)">
+                  确认
+                </el-button>
+              </template>
+            </el-table-column>
           </el-table>
           <div v-if="recentAlerts.length === 0" class="empty-alert">暂无告警，运行状态正常</div>
-          <div class="more" @click="goto('/apps')">
-            低代码应用运行页可自定义告警看板 <el-icon><ArrowRight /></el-icon>
+          <div class="more" @click="goto('/alerts')">
+            查看全部告警与处理记录 <el-icon><ArrowRight /></el-icon>
           </div>
         </el-card>
       </el-col>

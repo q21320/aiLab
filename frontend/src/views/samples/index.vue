@@ -59,18 +59,27 @@ function saveTest() {
     ElMessage.warning("请填写测试项");
     return;
   }
-  store.recordTest(testingSample.value.id, testForm.value);
+  if (!store.recordTest(testingSample.value.id, testForm.value)) {
+    ElMessage.error("该样品已出库或已报废，不能继续记录测试");
+    return;
+  }
   testDialog.value = false;
   ElMessage.success("测试记录已写入履历");
 }
 function finishTest(s: Sample) {
-  store.finishTest(s.id);
+  if (!store.finishTest(s.id)) {
+    ElMessage.error("当前状态不允许标记完成（已出库/已报废）");
+    return;
+  }
   ElMessage.success("样品已完成全部测试");
 }
 async function doOutbound(s: Sample) {
   try {
     const { value } = await ElMessageBox.prompt("出库去向/领用人", "样品出库", { inputValue: "项目组A-李工" });
-    store.outbound(s.id, value || "库管-王工");
+    if (!store.outbound(s.id, value || "库管-王工")) {
+      ElMessage.error("当前状态不允许出库（仅「已完成」样品可出库）");
+      return;
+    }
     ElMessage.success("已出库，履历已更新");
   } catch {
     /* 取消 */
@@ -79,7 +88,10 @@ async function doOutbound(s: Sample) {
 async function doScrap(s: Sample) {
   try {
     const { value } = await ElMessageBox.prompt("报废原因", "样品报废", { inputValue: "复测不合格" });
-    store.scrap(s.id, value || "复测不合格");
+    if (!store.scrap(s.id, value || "复测不合格")) {
+      ElMessage.error("该样品已是终态（已出库/已报废）");
+      return;
+    }
     ElMessage.success("已报废，履历已更新");
   } catch {
     /* 取消 */

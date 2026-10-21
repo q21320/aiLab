@@ -47,7 +47,9 @@ function openApp(app: PublishedApp) {
 }
 
 function redesign(app: PublishedApp) {
-  router.push({ path: "/lowcode", query: { tab: app.kind } });
+  // 修复：原实现只带 tab，设计器永远加载内置示例稿，
+  // 改完发布会按 id 覆盖线上应用。这里带上 appId，由设计器加载该应用的真实 Schema。
+  router.push({ path: "/lowcode", query: { tab: app.kind, appId: app.id } });
 }
 
 async function unpublishApp(app: PublishedApp) {

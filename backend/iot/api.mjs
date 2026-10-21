@@ -19,15 +19,52 @@
 // ============================================================================
 
 import { listDrivers, probeDevice, readDevice, writeDevicePoint } from "./drivers.mjs";
+import { csvText } from "../csv.mjs";
 import { startSimulator, stopSimulator, simulatorStatus } from "./simulator.mjs";
 import { createAutoTestEngine } from "./autotest.mjs";
 
 export function createIotExtraRoutes(deps) {
-  const { sendJSON, readBody, getIot, persistIot, broadcast, histories, dataDir } = deps;
+  const { sendJSON, readBody, getIot, persistIot, broadcast, histories, dataDir, onRealPoint, getOverview, audit, recordPoint, pointStore } = deps;
+
+  /**
+   * 记录采集点：统一走 server.mjs 的 pushHistory（内存缓冲 + 批量落库）。
+   * 此前这里直接操作 histories，绕过了落库逻辑，导致真实设备的点位不进数据库。
+   */
+  function record(device, point) {
+    if (typeof recordPoint === "function") {
+      recordPoint(device, point);
+      return;
+    }
+    // 兜底：未注入时仍写内存
+    const list = histories.get(device.id) || [];
+    list.push(point);
+    if (list.length > 200) list.shift();
+    histories.set(device.id, list);
+  }
+
+  /**
+   * 动态获取采集调度器。
+   * 注意：不能在此处直接解构 deps.poller —— deps 是普通对象，解构在创建时就把
+   * poller 的值（当时还是 null）复制进来了，之后 pollerRef.current 变化不会被感知。
+   * 因此通过 getPoller() 每次实时读取。
+   */
+  const getPoller = () => (typeof deps.getPoller === "function" ? deps.getPoller() : deps.poller || null);
+
+  /** 记录设备操作审计（下发属于影响物理设备的操作，必须留痕） */
+  async function auditLog(req, module, action, detail) {
+    if (typeof audit !== "function") return;
+    try {
+      await audit(req, { module, action, detail });
+    } catch (e) {
+      console.error("[iot] 审计写入失败：", e.message);
+    }
+  }
 
   const engine = createAutoTestEngine({
     dataFile: `${dataDir}/autotest.json`,
     onEvent: (payload) => broadcast({ autotest: payload }),
+    // 供 mock 驱动取最近点位（函数声明会提升，可在下方定义）
+    getLatestPoints: (deviceId) => latestPointsOf(deviceId),
     onPoint: (device, key, value, unit) => {
       // 真实设备采集点进入统一实时流（大屏/仪表盘同一契约）
       const point = {
@@ -41,11 +78,13 @@ export function createIotExtraRoutes(deps) {
         [key]: value,
         unit: unit || "",
       };
-      const list = histories.get(device.id) || [];
-      list.push(point);
-      if (list.length > 200) list.shift();
-      histories.set(device.id, list);
-      broadcast({ devices: getIot().devices, points: [point], overview: null, alerts: getIot().alerts });
+      record(device, point);
+      // 修复：真实设备读数原先只进 SSE，不回写设备状态、也不触发告警，
+      // 导致大屏/历史曲线永远是 baseTemp 静态值、真实超限永不告警。
+      // 现在统一走 onRealPoint（回写当前值 + 阈值判定），并把真实点位算进概览。
+      if (typeof onRealPoint === "function") onRealPoint(device, point);
+      const overview = typeof getOverview === "function" ? getOverview([point]) : null;
+      broadcast({ devices: getIot().devices, points: [point], overview, alerts: getIot().alerts });
     },
   });
 
@@ -57,6 +96,32 @@ export function createIotExtraRoutes(deps) {
     // ---------------- 驱动与虚拟仪器 ----------------
     if (method === "GET" && path === "/api/iot/drivers") {
       sendJSON(res, 200, { drivers: listDrivers(), simulator: simulatorStatus() });
+      return true;
+    }
+
+    // 采集调度器状态（每台设备的采集周期、下次采集时间、最近错误）
+    if (method === "GET" && path === "/api/iot/poller") {
+      sendJSON(res, 200, {
+        running: !!getPoller(),
+        devices: typeof getPoller()?.snapshot === "function" ? getPoller().snapshot() : {},
+        defaultIntervalMs: getPoller()?.defaultIntervalMs ?? null,
+      });
+      return true;
+    }
+
+    // 立即触发一次采集（调试/运维用）
+    const pollMatch = path.match(/^\/api\/iot\/devices\/([^/]+)\/poll$/);
+    if (method === "POST" && pollMatch) {
+      const device = findDevice(decodeURIComponent(pollMatch[1]));
+      if (!device) return sendJSON(res, 404, { error: "设备不存在" }), true;
+      const plt = getPoller();
+      if (typeof plt?.pollNow !== "function") return sendJSON(res, 503, { error: "采集调度器未启动" }), true;
+      try {
+        await plt.pollNow(device.id);
+        sendJSON(res, 200, { ok: true, device: device.id, status: device.status, values: device.temperature });
+      } catch (e) {
+        sendJSON(res, 500, { error: e.message });
+      }
       return true;
     }
     if (method === "POST" && path === "/api/iot/simulator/start") {
@@ -99,9 +164,33 @@ export function createIotExtraRoutes(deps) {
       if (!device) return sendJSON(res, 404, { error: "设备不存在" }), true;
       try {
         const result = await readDevice(device, { latestPoints: latestPointsOf(device.id) });
-        device.lastRead = { time: Date.now(), values: result.values };
+        const now = Date.now();
+        device.lastRead = { time: now, values: result.values };
+        // 手动「读取」与自动测试采集走同一条链路：回写设备当前值 + 历史曲线 + 阈值告警 + SSE 推送。
+        // 否则设备接入页读到的数据不会出现在大屏/历史里，真实超限也不会告警。
+        const points = [];
+        for (const [key, v] of Object.entries(result.values || {})) {
+          if (typeof v?.value !== "number" || !Number.isFinite(v.value)) continue;
+          const point = {
+            deviceId: device.id,
+            deviceName: device.name,
+            type: device.type || "test",
+            time: now,
+            temperature: key === "temperature" ? v.value : undefined,
+            humidity: key === "humidity" ? v.value : undefined,
+            power: key === "power" ? v.value : undefined,
+            [key]: v.value,
+            unit: v.unit || "",
+          };
+          record(device, point);
+          if (typeof onRealPoint === "function") onRealPoint(device, point);
+          points.push(point);
+        }
         persistIot();
-        sendJSON(res, 200, { ok: true, values: result.values, time: Date.now() });
+        if (points.length) {
+          broadcast({ devices: getIot().devices, points, overview: typeof getOverview === "function" ? getOverview(points) : null, alerts: getIot().alerts });
+        }
+        sendJSON(res, 200, { ok: true, values: result.values, time: now });
       } catch (e) {
         sendJSON(res, 200, { ok: false, error: e.message });
       }
@@ -118,8 +207,21 @@ export function createIotExtraRoutes(deps) {
           sendJSON(res, 400, { error: "缺少点位 key" });
           return true;
         }
+        // 记录下发前的值，前端可据此展示"设定值 → 实测值"的对比
+        const before = device[body.key];
         const result = await writeDevicePoint(device, body.key, body.value);
-        sendJSON(res, 200, { ok: true, result });
+        if (result && result.ok === false) {
+          // 仪器明确拒绝了命令（例如 SCPI 返回 ERROR:...）
+          sendJSON(res, 200, { ok: false, error: result.error || "设备拒绝该命令", result });
+          return true;
+        }
+        await auditLog(
+          req,
+          "物联",
+          "设备下发",
+          `向 ${device.id}「${device.name}」下发 ${body.key} = ${body.value}（${result?.command || "寄存器写入"}）`,
+        );
+        sendJSON(res, 200, { ok: true, result, before: typeof before === "number" ? before : null, command: result?.command || "" });
       } catch (e) {
         sendJSON(res, 200, { ok: false, error: e.message });
       }
@@ -130,7 +232,104 @@ export function createIotExtraRoutes(deps) {
     if (method === "GET" && liveMatch) {
       const id = decodeURIComponent(liveMatch[1]);
       const device = findDevice(id);
-      sendJSON(res, 200, { device: device || null, history: (histories.get(id) || []).slice(-60) });
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const from = Number(url.searchParams.get("from")) || 0;
+      const to = Number(url.searchParams.get("to")) || 0;
+      const limit = Number(url.searchParams.get("limit")) || 0;
+      const bucketMs = Number(url.searchParams.get("bucketMs")) || 0;
+
+      // 带时间范围 → 查数据库（完整历史）；否则返回内存实时缓冲（兼容旧调用）
+      if ((from || to || limit > 60) && typeof pointStore?.queryHistory === "function") {
+        try {
+          const history = await pointStore.queryHistory({ deviceId: id, from, to, limit: limit || 500, bucketMs });
+          sendJSON(res, 200, { device: device || null, history, source: "db" });
+          return true;
+        } catch (e) {
+          console.error("[iot] 历史查询失败：", e.message);
+        }
+      }
+      sendJSON(res, 200, { device: device || null, history: (histories.get(id) || []).slice(-60), source: "memory" });
+      return true;
+    }
+
+    // 采集数据导出 CSV（按设备与时间范围）
+    if (method === "GET" && path === "/api/iot/points/export.csv") {
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const deviceId = url.searchParams.get("deviceId") || "";
+      const from = Number(url.searchParams.get("from")) || 0;
+      const to = Number(url.searchParams.get("to")) || 0;
+      try {
+        const rows = await pointStore.exportRows({ deviceId: deviceId || undefined, from, to, maxRows: 100000 });
+        // 动态列：temperature/humidity/power + values 里的自定义 key
+        const extraKeys = new Set();
+        for (const r of rows) {
+          for (const [k, v] of Object.entries(r)) {
+            if (!["deviceId", "deviceName", "time", "type", "unit", "temperature", "humidity", "power"].includes(k) && typeof v === "number") {
+              extraKeys.add(k);
+            }
+          }
+        }
+        const header = ["设备ID", "时间", "温度", "湿度", "功率", ...extraKeys];
+        const data = rows.map((r) => [
+          r.deviceId,
+          new Date(r.time).toLocaleString("zh-CN", { hour12: false }),
+          r.temperature ?? "",
+          r.humidity ?? "",
+          r.power ?? "",
+          ...[...extraKeys].map((k) => r[k] ?? ""),
+        ]);
+        const csv = csvText(header, data);
+        const fname = `iot-points-${deviceId || "all"}-${new Date().toISOString().slice(0, 10)}.csv`;
+        res.writeHead(200, {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${fname}"`,
+        });
+        res.end(csv);
+      } catch (e) {
+        console.error("[iot] 导出失败：", e.message);
+        sendJSON(res, 500, { error: "导出失败：" + e.message });
+      }
+      return true;
+    }
+
+    // 物联网运维设置（数据留存天数）
+    if (path === "/api/iot/settings") {
+      if (method === "GET") {
+        let stats = null;
+        try {
+          stats = await pointStore.stats();
+        } catch {
+          /* 统计失败不影响读取配置 */
+        }
+        sendJSON(res, 200, {
+          ok: true,
+          retentionDays: pointStore.getRetentionDays?.() ?? 90,
+          stats,
+        });
+        return true;
+      }
+      if (method === "PUT") {
+        const body = await readBody(req).catch(() => ({}));
+        const r = pointStore.setRetentionDays?.(body?.retentionDays);
+        if (!r || !r.ok) {
+          sendJSON(res, 400, { error: r?.error || "设置失败" });
+          return true;
+        }
+        if (typeof audit === "function") {
+          await audit(req, { module: "物联", action: "修改设置", detail: `采集数据留存期改为 ${r.retentionDays} 天` });
+        }
+        sendJSON(res, 200, { ok: true, retentionDays: r.retentionDays });
+        return true;
+      }
+    }
+
+    // 采集数据统计（运维用）
+    if (method === "GET" && path === "/api/iot/points/stats") {
+      try {
+        sendJSON(res, 200, { ok: true, stats: await pointStore.stats() });
+      } catch (e) {
+        sendJSON(res, 500, { error: e.message });
+      }
       return true;
     }
 
@@ -186,7 +385,6 @@ export function createIotExtraRoutes(deps) {
       res.writeHead(200, {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="autotest-report.csv"`,
-        "Access-Control-Allow-Origin": "*",
       });
       res.end(csv);
       return true;

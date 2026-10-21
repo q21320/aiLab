@@ -57,6 +57,7 @@ export function defaultMenus(): MenuItem[] {
       enable: true,
       children: [
         { id: menuId(), title: "设备接入", icon: "Monitor", path: "/iot", roles: ["admin", "operator"], enable: true },
+        { id: menuId(), title: "告警管理", icon: "Warning", path: "/alerts", roles: ["admin", "operator", "viewer"], enable: true },
         { id: menuId(), title: "自动化测试", icon: "Cpu", path: "/autotest", roles: ["admin", "operator"], enable: true },
       ],
     },

@@ -1,0 +1,67 @@
+# ============================================================================
+# AI Lab 实验室数字化管理平台 · Docker 一键部署
+#
+# 用法：
+#   1) cp .env.docker.example .env   然后按需修改（尤其密码与 DASHSCOPE_API_KEY）
+#   2) docker compose up -d --build
+#   3) 浏览器访问 http://localhost:3800
+#
+# 停止：docker compose down           （保留数据）
+# 清空：docker compose down -v        （删除数据卷，慎用）
+# ============================================================================
+name: ailab
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-ailab}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ailab_dev_pwd}
+      POSTGRES_DB: ${DB_NAME:-ailab}
+      # 初始化时校验器规范化，避免中文/特殊字符排序问题
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 数据库就绪后 app 才启动，避免后端连接失败导致容器退出
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ailab} -d ${DB_NAME:-ailab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # 默认不对外暴露数据库端口；需要本机用客户端直连时取消注释
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    networks:
+      - ailab-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${DB_USER:-ailab}:${DB_PASSWORD:-ailab_dev_pwd}@postgres:5432/${DB_NAME:-ailab}
+      PORT: 3800
+      AILAB_HOST: 0.0.0.0
+      AILAB_NO_OPEN: "1"
+      # 可选：AI 页面生成密钥（留空则关闭该功能）
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # 时区：影响采集时间与审计日志时间戳
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${APP_PORT:-3800}:3800"
+    networks:
+      - ailab-net
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  ailab-net:
+    driver: bridge

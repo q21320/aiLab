@@ -22,6 +22,9 @@ import { echarts, chartOption } from "../../lowcode/charts";
 
 startIotLive();
 const sampleStore = useSampleStore();
+
+/** 只有未出库/未报废的样品才能接收测试结论（状态机守卫的前端侧同步） */
+const testableSamples = computed(() => sampleStore.samples.filter((s) => s.status !== "out" && s.status !== "scrapped"));
 const userStore = useUserStore();
 
 const plans = ref<AutoTestPlan[]>([]);
@@ -85,11 +88,15 @@ watch(
 /** 测试结论回写样品履历（4.5 联动） */
 function writeSampleRecord(conclusion: string) {
   if (!selectedSampleId.value || !currentRun.value) return;
-  sampleStore.recordTest(selectedSampleId.value, {
+  const ok = sampleStore.recordTest(selectedSampleId.value, {
     item: `${currentRun.value.planName}（自动化）`,
     result: conclusion === "qualified" ? "合格" : "不合格",
     tester: `${userStore.name || "系统"}-自动测试`,
   });
+  if (!ok) {
+    ElMessage.error("该样品已出库或已报废，结论未写入");
+    return;
+  }
   ElMessage.success("测试结论已写入样品履历");
 }
 
@@ -277,7 +284,7 @@ function openReport(id: string) {
         </el-select>
         <el-select v-model="selectedSampleId" placeholder="关联样品（可选）" clearable style="width: 220px">
           <el-option
-            v-for="s in sampleStore.samples"
+            v-for="s in testableSamples"
             :key="s.id"
             :label="`${s.id} ${s.name}`"
             :value="s.id"

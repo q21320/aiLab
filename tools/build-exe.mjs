@@ -23,6 +23,22 @@ const DIST = join(FRONTEND, "dist");
 const BUILD = join(BACKEND, "build");
 const RELEASE = join(ROOT, "release");
 
+/**
+ * 平台断言：SEA 注入的是「当前运行的这个 node 可执行文件」的副本。
+ * 在 macOS/Linux 上构建只会得到一个名叫 .exe 却无法在 Windows 运行的二进制，
+ * 与其产出一个"看似成功"的坏包，不如直接失败并给出明确提示。
+ * 如需非 Windows 交叉构建，请用 Windows 机器或 CI（windows-latest runner）。
+ */
+if (process.platform !== "win32") {
+  console.error(
+    `\n[build-exe] 当前平台是 ${process.platform}，无法生成可运行的 Windows exe。\n` +
+      `  Node SEA 的做法是把应用负载注入到「本机 node.exe」副本中，\n` +
+      `  因此 exe 必须在 Windows 上构建（或使用 windows-latest 的 CI runner）。\n` +
+      `  若只想验证前端构建流程，请直接运行：cd frontend && npm run build\n`,
+  );
+  process.exit(1);
+}
+
 const args = process.argv.slice(2);
 const skipFrontend = args.includes("--skip-frontend");
 const nameArg = args.find((a) => a.startsWith("--name="));
@@ -34,10 +50,12 @@ function log(step, msg) {
   console.log(`\n[${step}] ${msg}`);
 }
 function run(cmd, cmdArgs, cwd) {
-  // Windows 下 shell 模式需要给含空格的路径（如 C:\Program Files\nodejs\node.exe）加引号
-  const safeCmd = /\s/.test(cmd) ? `"${cmd}"` : cmd;
+  // 不经过 shell：参数（含中文名、空格、括号、&）不会被二次解析或截断，
+  // 也杜绝了命令行注入。Windows 下的 .cmd/npm 需要 shell，仅在必要时启用。
+  const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
+  const safeCmd = needsShell && /\s/.test(cmd) ? `"${cmd}"` : cmd;
   console.log(`  $ ${safeCmd} ${cmdArgs.join(" ")}`);
-  const res = spawnSync(safeCmd, cmdArgs, { cwd, stdio: "inherit", shell: true });
+  const res = spawnSync(safeCmd, cmdArgs, { cwd, stdio: "inherit", shell: needsShell });
   if (res.status !== 0) throw new Error(`${cmd} 执行失败（exit ${res.status}）`);
 }
 
@@ -146,11 +164,10 @@ const postjectBin = join(BACKEND, "node_modules", ".bin", process.platform === "
 // postject 用法：postject <exe> NODE_SEA_BLOB <blob> --sentinel-fuse <fuse>
 const postjectArgs = [EXE_PATH, "NODE_SEA_BLOB", blobPath, "--sentinel-fuse", SEA_FUSE];
 if (process.platform === "darwin") postjectArgs.push("--macho-segment-name", "NODE_SEA");
-const inject = spawnSync(
-  existsSync(postjectBin) ? postjectBin : "npx",
-  existsSync(postjectBin) ? postjectArgs : ["--yes", "postject", ...postjectArgs],
-  { cwd: BACKEND, stdio: "inherit", shell: true }
-);
+if (!existsSync(postjectBin)) {
+  throw new Error(`未找到 postject：${postjectBin}\n请先在 backend 目录执行 npm install（不再回退到 npx，保证构建可复现）`);
+}
+const inject = spawnSync(postjectBin, postjectArgs, { cwd: BACKEND, stdio: "inherit", shell: false });
 if (inject.status !== 0) throw new Error("postject 注入失败");
 
 // ---------------------------------------------------------------------------

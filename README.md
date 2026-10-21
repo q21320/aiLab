@@ -43,9 +43,16 @@ B/S 架构的实验室数字化管理平台（Vue 3 + TypeScript + Element Plus 
 ## 快速开始
 
 ```bash
-# 1) 启动低代码后端（可选，但推荐；Node ≥ 18，零依赖）
+# 0) 准备 PostgreSQL（必需，见下文「数据存储」）
+./tools/init-db.sh
+
+# 1) 启动后端（必需；Node ≥ 18）
 cd backend
+npm install          # 后端依赖 pg 驱动
+cp .env.example .env # 填入 DATABASE_URL；可选填 DASHSCOPE_API_KEY 启用 AI 生成
 npm start            # http://localhost:3800
+
+# 说明：后端启动时必须能访问，否则登录/发布/审计等写操作会返回 401。
 
 # 2) 启动前端
 cd frontend
@@ -55,6 +62,78 @@ npm run build        # 类型检查 + 生产构建
 ```
 
 登录页提供三级权限演示账号：`admin/admin123`（管理员）· `engineer/eng123`（工程师）· `viewer/view123`（访客）。
+
+## 数据存储（PostgreSQL）
+
+后端所有业务数据存储在 **PostgreSQL**（不再使用 JSON 文件）：
+
+| 表 | 内容 | 关键设计 |
+| --- | --- | --- |
+| `users` | 用户与角色 | 密码存 SHA-256 散列；`role` 有 CHECK 约束 |
+| `sessions` | 登录会话 | `expires_at` 索引，过期自动清理；多实例部署天然共享 |
+| `audit_logs` | 操作日志 | `time`/`module` 索引，**分页在数据库完成**（不再全量读文件排序） |
+| `apps` | 低代码已发布应用 | Schema 存 JSONB，`(kind,id)` 复合主键 |
+| `form_submissions` | 表单提交 | 不限条数；按 `form_id + submitted_at` 索引 |
+| `crud_resources` / `crud_rows` | 通用 CRUD 数据 | 行级存储，并发写入不互相覆盖 |
+| `kv_documents` | IoT 状态、测试方案等 | JSONB 文档，兼容原 JSON 结构 |
+
+### 初始化
+
+```bash
+# 1) 启动 PostgreSQL（Postgres.app / brew services start postgresql@17 / Docker 均可）
+# 2) 创建库与用户（幂等，可重复执行）
+./tools/init-db.sh
+
+# 3) 配置连接串
+cp backend/.env.example backend/.env
+#   编辑 backend/.env，填入脚本输出的 DATABASE_URL
+
+# 4) 启动后端（首次启动会自动建表）
+cd backend && npm install && npm start
+```
+
+也可用环境变量直接指定：`DATABASE_URL=postgres://user:pass@host:5432/ailab`，
+或分别设置 `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE`。
+
+### 从旧版本（JSON 文件）升级
+
+首次以数据库模式启动时，会自动把 `backend/data/` 下的旧数据（apps/iot/autotest 的 JSON、
+审计 JSONL、表单提交、CRUD）**一次性迁移**到数据库，日志会打印迁移条数。
+迁移是幂等的：目标表已有数据则跳过，不会重复导入。
+
+> ⚠️ 数据库连接失败时后端会**直接启动失败并报错**，不会静默退化成文件存储——
+> 避免出现"以为在用数据库、其实没连上"的情况。
+
+## 安全与鉴权（4.9）
+
+**登录、密码校验、角色判定全部由后端完成，前端不再持有任何权限凭据。**
+
+| 项目 | 说明 |
+| --- | --- |
+| 会话机制 | `POST /api/auth/login` 由服务端校验密码，签发随机 token，写入 **HttpOnly + SameSite=Lax** Cookie（前端 JS 不可读取）；`GET /api/auth/me` 获取当前身份 |
+| 权限矩阵 | 见 `backend/auth.mjs` 的 `ROUTE_RULES`：备份/恢复/清空日志/用户管理 = 仅管理员；设备下发、自动化测试、发布应用、AI 生成 = 工程师及以上；其余需登录 |
+| 用户存储 | `backend/data/users.json`（密码为 SHA-256 散列）；用户管理页支持增删改、重置密码，**不允许删除最后一个管理员** |
+| 修改密码 | 系统设置 → 安全，由服务端校验旧密码（原先只在前端提示成功） |
+| 审计可信 | 日志的 `user/role` 一律由服务端会话推导，客户端自报的身份被忽略；登录/退出/改密/用户变更均由服务端写入 |
+| CORS | 由 `*` 改为**来源白名单**（默认本机 5173/4173/3800），可用 `AILAB_CORS_ORIGINS` 追加部署域名 |
+| CSV 导出 | 全字段转义并中和 `= + - @` 前缀，防止 Excel 公式注入 |
+| 样式注入 | 低代码 schema 的 CSS 经 `frontend/src/lowcode/sanitize.ts` 白名单清洗（拒绝 `url()`/`position:fixed` 等），发布前统一清洗 |
+
+### AI 页面生成的密钥配置
+
+密钥**不再内置在前端代码中**。启用 AI 生成需要配置 DashScope 密钥：
+
+```bash
+cd backend
+cp .env.example .env        # 然后填写 DASHSCOPE_API_KEY=sk-...
+npm start
+```
+
+前端只调用同源接口 `POST /api/ai/generate`，由后端（`backend/ai.mjs`）携带密钥转发，
+并负责超时控制与错误归一；未配置密钥时返回 503 并在界面提示。
+
+> ⚠️ 若你使用过本项目早期版本，请**立即到 DashScope 控制台吊销旧密钥**——旧版本曾把它硬编码在
+> `frontend/src/lowcode/generator.ts` 中，任何访问者都能从打包产物里提取到。
 
 ## 打包为 Windows 单文件 exe（离线便携版）
 

@@ -1,0 +1,61 @@
+# ============================================================================
+# AI Lab 平台 · 离线交付版（用户无需源码、无需联网拉镜像）
+#
+# 与开发版的区别：
+#   · app 服务使用预构建镜像 ailab-app:latest（由 docker load 载入），不再 build；
+#   · postgres 使用预导入镜像，避免用户联网拉取。
+#
+# 使用：
+#   1) docker load -i images/ailab-app.tar
+#   2) docker load -i images/postgres-17-alpine.tar
+#   3) cp .env.docker.example .env  并修改密码
+#   4) docker compose -f docker-compose.release.yml up -d
+#   5) 浏览器访问 http://localhost:3800
+# ============================================================================
+name: ailab
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-ailab}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-ailab}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ailab} -d ${DB_NAME:-ailab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - ailab-net
+
+  app:
+    image: ailab-app:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${DB_USER:-ailab}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-ailab}
+      PORT: 3800
+      AILAB_HOST: 0.0.0.0
+      AILAB_NO_OPEN: "1"
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${APP_PORT:-3800}:3800"
+    networks:
+      - ailab-net
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  ailab-net:
+    driver: bridge

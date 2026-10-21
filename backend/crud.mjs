@@ -35,32 +35,88 @@ function seedDb() {
   };
 }
 
-export function createCrudRoutes({ sendJSON, readBody, dataFile }) {
-  let db;
-  try {
-    db = existsSync(dataFile) ? JSON.parse(readFileSync(dataFile, "utf-8")) : seedDb();
-  } catch (e) {
-    console.error("[crud] 读取数据失败，使用内置示例：", e.message);
-    db = seedDb();
-  }
-  if (!db || typeof db !== "object" || Object.keys(db).length === 0) db = seedDb();
-
-  function persist() {
+export function createCrudRoutes({ sendJSON, readBody, dataFile, database }) {
+  /** 安全解码路径参数：畸形百分号编码返回 400，而不是抛出 URIError 打挂请求 */
+  function safeDecode(v) {
     try {
-      mkdirSync(dataFile.replace(/[\\/][^\\/]+$/, ""), { recursive: true });
-      writeFileSync(dataFile, JSON.stringify(db, null, 2), "utf-8");
-    } catch (e) {
-      console.error("[crud] 保存数据失败：", e.message);
+      return decodeURIComponent(String(v));
+    } catch {
+      const e = new Error("路径参数编码非法");
+      e.statusCode = 400;
+      throw e;
     }
   }
-  persist();
+  const dbConn = database || null;
+
+  // 存储：内存模型 + PostgreSQL 持久化
+  // （业务代码仍操作 db 对象；每次变更后异步落库，并发写入走 UPSERT 不再整份覆盖）
+  let db = seedDb();
+  /** 数据库就绪后由外部注入初值（从数据库读取或从旧 JSON 迁移） */
+  function hydrate(data) {
+    if (data && typeof data === "object" && Object.keys(data).length) db = data;
+  }
+
+  function persist() {
+    if (!dbConn) return;
+    const snapshot = JSON.parse(JSON.stringify(db));
+    dbConn
+      .transaction(async (client) => {
+        for (const [resource, res] of Object.entries(snapshot)) {
+          await client.query(
+            `INSERT INTO crud_resources (resource, fields) VALUES ($1, $2::jsonb)
+             ON CONFLICT (resource) DO UPDATE SET fields = EXCLUDED.fields`,
+            [resource, JSON.stringify(res.fields || [])],
+          );
+          // 以「整资源替换」方式同步行数据，保证与内存模型一致
+          await client.query("DELETE FROM crud_rows WHERE resource = $1", [resource]);
+          for (const row of res.rows || []) {
+            await client.query("INSERT INTO crud_rows (resource, id, data, updated_at) VALUES ($1,$2,$3::jsonb,$4)", [
+              resource,
+              String(row.id),
+              JSON.stringify(row),
+              Number(row.updatedAt) || Date.now(),
+            ]);
+          }
+        }
+      })
+      .catch((e) => console.error("[crud] 保存数据失败：", e.message));
+  }
+
+  /** 资源名白名单：防止任意 URL / 原型键（__proto__、constructor）落盘 */
+  const RESOURCE_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,40}$/;
+  function isValidResource(name) {
+    return RESOURCE_RE.test(String(name || ""));
+  }
+  /** 只读取现有资源，不存在返回 null（GET 不再凭空创建资源） */
+  function getResource(name) {
+    if (!name || !Object.hasOwn(db, name)) return null;
+    return db[name];
+  }
 
   function ensureResource(name) {
-    if (!db[name]) {
+    if (!Object.hasOwn(db, name)) {
       db[name] = { fields: [{ prop: "id", label: "ID", type: "text", required: true }], rows: [] };
       persist();
     }
     return db[name];
+  }
+
+  /**
+   * 解析并校验资源名；非法时直接回 400 并返回 null。
+   * create=true 表示当前操作允许新建资源（仅写入类操作）。
+   */
+  function resolveResource(res, name, { create = false } = {}) {
+    if (!isValidResource(name)) {
+      sendJSON(res, 400, { error: "资源名非法：需字母开头，仅含字母/数字/下划线/短横线（≤41 字符）" });
+      return null;
+    }
+    const found = getResource(name);
+    if (found) return found;
+    if (!create) {
+      sendJSON(res, 404, { error: `资源不存在：${name}` });
+      return null;
+    }
+    return ensureResource(name);
   }
 
   /** 推断字段（未配置时按首行数据生成） */
@@ -79,7 +135,7 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile }) {
 
   const ok = (res, data) => sendJSON(res, 200, { ok: true, ...data });
 
-  return async function handle(req, res, path, method) {
+  async function handle(req, res, path, method) {
     // 资源清单
     if (method === "GET" && path === "/api/crud/resources") {
       ok(res, {
@@ -95,8 +151,10 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile }) {
     // 列表：/api/crud/:resource
     const listMatch = path.match(/^\/api\/crud\/([^/]+)$/);
     if (listMatch && (method === "GET" || method === "POST")) {
-      const name = decodeURIComponent(listMatch[1]);
-      const r = ensureResource(name);
+      const name = safeDecode(listMatch[1]);
+      // GET 只读：不存在的资源返回 404，不再因为拼错名字就落盘一个空表
+      const r = resolveResource(res, name, { create: method === "POST" });
+      if (!r) return true;
       if (method === "GET") {
         const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
         const page = Math.max(1, Number(url.searchParams.get("page") || 1));
@@ -167,8 +225,8 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile }) {
     // 资源字段元数据（供设计器自动带出列/表单字段）—— 必须放在 /:resource/:id 之前
     const metaMatch = path.match(/^\/api\/crud\/([^/]+)\/meta$/);
     if (method === "GET" && metaMatch) {
-      const name = decodeURIComponent(metaMatch[1]);
-      const r = ensureResource(name);
+      const name = safeDecode(metaMatch[1]);
+      const r = resolveResource(res, name);
       ok(res, { resource: name, fields: inferFields(r), count: r.rows.length });
       return true;
     }
@@ -176,9 +234,9 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile }) {
     // 详情 / 修改 / 删除：/api/crud/:resource/:id
     const itemMatch = path.match(/^\/api\/crud\/([^/]+)\/([^/]+)$/);
     if (itemMatch) {
-      const name = decodeURIComponent(itemMatch[1]);
-      const id = decodeURIComponent(itemMatch[2]);
-      const r = ensureResource(name);
+      const name = safeDecode(itemMatch[1]);
+      const id = safeDecode(itemMatch[2]);
+      const r = resolveResource(res, name, { create: method === "PUT" || method === "POST" });
       const idx = r.rows.findIndex((x) => String(x.id) === String(id));
       if (method === "GET") {
         if (idx < 0) {
@@ -219,5 +277,10 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile }) {
     }
 
     return false;
-  };
+  }
+
+  // 暴露给 server.mjs：用数据库中的初始数据填充内存模型
+  handle.hydrate = hydrate;
+  handle.snapshot = () => JSON.parse(JSON.stringify(db));
+  return handle;
 }

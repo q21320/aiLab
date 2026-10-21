@@ -84,10 +84,39 @@ function dateStr(offset: number): string {
   return new Date(dayStart(offset)).toISOString().slice(0, 10);
 }
 
-let seq = 100;
-function nextId(prefix: string): string {
-  seq += 1;
-  return `${prefix}-${seq}`;
+/**
+ * ID 生成（修复历史）：
+ *   1) 原实现用模块级 `let seq = 100`，刷新页面后重新计数，
+ *      新建订单与历史订单主键重复 → 工单串单、删除误伤；
+ *   2) 改为在 nextId() 内调用 useProductionStore() 后，seedWorkOrders() 等
+ *      种子函数是在 store 的 state() 初始化期间调用的，此刻 store 实例尚未注册，
+ *      useProductionStore() 返回 undefined → 白屏。
+ * 现在改为纯函数，由调用方显式传入「现有数据源」：
+ *   · 种子数据在 state() 期间生成：用独立计数器，不读取 store；
+ *   · 运行时新增：传入当前 store 的全部状态，从已存在的 ID 推导。
+ */
+function scanMaxId(prefix: string, data: unknown): number {
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
+  let max = 0;
+  const walk = (v: unknown) => {
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item);
+      return;
+    }
+    const obj = v as Record<string, unknown>;
+    if (typeof obj.id === "string") {
+      const m = re.exec(obj.id);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    for (const val of Object.values(obj)) if (val && typeof val === "object") walk(val);
+  };
+  walk(data);
+  return max;
+}
+
+function nextId(prefix: string, data?: unknown): string {
+  return `${prefix}-${scanMaxId(prefix, data) + 1}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,9 +148,13 @@ function seedLines(): CapacityLine[] {
 
 const firstDay = dayStart(0);
 
+/** 种子数据在 state() 初始化期间生成，不能访问 store，用局部计数器 */
+let seedWoSeq = 200;
+let seedExSeq = 0;
+
 function seedWorkOrders(lines: CapacityLine[], processes: ProcessDef[]): WorkOrder[] {
   const mk = (orderId: string, p: ProcessDef, line: CapacityLine, startOffsetH: number, progress: number, status: WorkOrder["status"]): WorkOrder => ({
-    id: nextId("WO"),
+    id: `WO-${++seedWoSeq}`,
     orderId,
     processId: p.id,
     processName: p.name,
@@ -145,7 +178,7 @@ function seedWorkOrders(lines: CapacityLine[], processes: ProcessDef[]): WorkOrd
 function seedExceptions(orderIds: string[]): ExceptionRecord[] {
   return [
     {
-      id: nextId("EX"),
+      id: `EX-${++seedExSeq}`,
       orderId: orderIds[0] || "PO-24001",
       woId: "",
       type: "设备故障",
@@ -193,7 +226,7 @@ export const useProductionStore = defineStore("production", {
     // ---------- 订单 ----------
     addOrder(o: { product: string; qty: number; due: string; priority: ProductionOrder["priority"] }) {
       this.orders.push({
-        id: nextId("PO"),
+        id: nextId("PO", this.$state),
         product: o.product,
         qty: o.qty,
         due: o.due,
@@ -232,7 +265,7 @@ export const useProductionStore = defineStore("production", {
           return false; // 排产窗口不足
         }
         this.workOrders.push({
-          id: nextId("WO"),
+          id: nextId("WO", this.$state),
           orderId,
           processId: p.id,
           processName: p.name,
@@ -282,7 +315,7 @@ export const useProductionStore = defineStore("production", {
     // ---------- 异常 ----------
     raiseException(e: { orderId: string; woId?: string; type: string; desc: string }) {
       this.exceptions.unshift({
-        id: nextId("EX"),
+        id: nextId("EX", this.$state),
         orderId: e.orderId,
         woId: e.woId,
         type: e.type,
@@ -308,7 +341,7 @@ export const useProductionStore = defineStore("production", {
 
     // ---------- 工艺档案 ----------
     addProcess(p: { name: string; hours: number; deviceType: string }) {
-      this.processes.push({ id: nextId("PR"), ...p });
+      this.processes.push({ id: nextId("PR", this.$state), ...p });
       this.persist();
     },
     removeProcess(id: string) {
@@ -316,7 +349,7 @@ export const useProductionStore = defineStore("production", {
       this.persist();
     },
     addLine(l: { name: string; type: string; hoursPerDay: number }) {
-      this.lines.push({ id: nextId("LN"), ...l });
+      this.lines.push({ id: nextId("LN", this.$state), ...l });
       this.persist();
     },
     removeLine(id: string) {

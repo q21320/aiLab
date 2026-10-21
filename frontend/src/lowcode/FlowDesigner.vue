@@ -27,7 +27,10 @@ import { clone, uid } from "./schemaOps";
 import { autoLayout } from "./flowLayout";
 
 const store = useLowcodeStore();
-const flow = ref<FlowSchema>(clone(store.projects.flow || defaultFlowSchema()));
+
+// 从「应用中心 · 重新设计」进入时，父级传入该应用的真实 Schema（修复：原先永远加载内置示例）
+const props = defineProps<{ schema?: FlowSchema | null }>();
+const flow = ref<FlowSchema>(clone(props.schema || store.projects.flow || defaultFlowSchema()));
 
 // 画布逻辑尺寸（viewBox）
 const CANVAS_W = 1280;
@@ -389,7 +392,7 @@ onBeforeUnmount(() => {
 });
 
 function resetExample() {
-  flow.value = clone(defaultFlowSchema());
+  flow.value = { ...clone(defaultFlowSchema()), id: uid("flow") };
   selected.value = "";
   ElMessage.success("已恢复示例流程");
 }

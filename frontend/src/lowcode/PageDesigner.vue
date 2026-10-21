@@ -42,7 +42,10 @@ import type { PageSchema, SchemaNode, NodeType } from "./types";
 // 状态
 // ---------------------------------------------------------------------------
 const store = useLowcodeStore();
-const schema = ref<PageSchema>(clone(store.projects.page || createEmptyPage()));
+
+// 从「应用中心 · 重新设计」进入时，父级传入该应用的真实 Schema（修复：原先永远加载内置示例）
+const props = defineProps<{ schema?: PageSchema | null }>();
+const schema = ref<PageSchema>(clone(props.schema || store.projects.page || createEmptyPage()));
 const selectedId = ref("");
 
 const selectedNode = computed<SchemaNode | null>(() =>

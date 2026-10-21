@@ -28,7 +28,10 @@ import { clone, uid } from "./schemaOps";
 import ReportBlockView from "./ReportBlockView.vue";
 
 const store = useLowcodeStore();
-const report = ref<ReportSchema>(clone(store.projects.report || defaultReportSchema()));
+
+// 从「应用中心 · 重新设计」进入时，父级传入该应用的真实 Schema（修复：原先永远加载内置示例）
+const props = defineProps<{ schema?: ReportSchema | null }>();
+const report = ref<ReportSchema>(clone(props.schema || store.projects.report || defaultReportSchema()));
 const selectedId = ref("");
 const selectedBlock = computed<ReportBlock | undefined>(() =>
   report.value.blocks.find((b) => b.id === selectedId.value)
@@ -205,7 +208,7 @@ watch(
 );
 
 function resetExample() {
-  report.value = clone(defaultReportSchema());
+  report.value = { ...clone(defaultReportSchema()), id: uid("report") };
   selectedId.value = "";
   ElMessage.success("已恢复示例报表");
 }

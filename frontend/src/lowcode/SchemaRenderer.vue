@@ -4,6 +4,7 @@ import { CopyDocument, Delete } from "@element-plus/icons-vue";
 import type { SchemaNode } from "./types";
 import { NODE_TYPE_LABELS, CONTAINER_TYPES } from "./types";
 import { LC_DRAG_KEY, LC_ACTIONS_KEY } from "./lcCore";
+import { sanitizeStyle, sanitizeImageSrc } from "./sanitize";
 // 组件递归引用自身，用于渲染子节点
 import SchemaRenderer from "./SchemaRenderer.vue";
 import CrudTable from "./CrudTable.vue";
@@ -113,6 +114,8 @@ function duplicateSelf(ev: MouseEvent) {
   actions?.duplicate(props.node.id);
 }
 
+const sanitizedStyle = computed(() => sanitizeStyle(props.node.style));
+
 // 通用绑定：样式、选中态、点击、类型标记、节点拖拽
 const binds = computed(() => ({
   class: [
@@ -120,7 +123,8 @@ const binds = computed(() => ({
     "lc-node--" + props.node.type,
     { "lc-node--selected": isSelected.value },
   ],
-  style: props.node.style || {},
+  // 安全：样式经白名单清洗后才绑定，防止 url()/position:fixed 覆盖全站
+  style: sanitizedStyle.value,
   "data-type": NODE_TYPE_LABELS[props.node.type] || props.node.type,
   "data-lc-node": true,
   onClick: selectSelf,
@@ -362,7 +366,7 @@ const allBinds = computed(() => ({ ...binds.value, ...containerBinds.value }));
   </el-table>
 
   <!-- 图片 -->
-  <el-image v-else-if="node.type === 'image'" v-bind="binds" :src="p.src" :fit="p.fit || 'cover'" />
+  <el-image v-else-if="node.type === 'image'" v-bind="binds" :src="sanitizeImageSrc(p.src)" :fit="p.fit || 'cover'" />
 
   <!-- 分割线 -->
   <el-divider v-else-if="node.type === 'divider'" v-bind="binds" />

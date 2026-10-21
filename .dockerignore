@@ -1,0 +1,21 @@
+# 依赖与构建产物（镜像内会重新安装/构建）
+**/node_modules/
+frontend/dist/
+backend/public/assets/
+backend/build/
+release/
+
+# 运行时数据与密钥（数据在 PostgreSQL，密钥走环境变量）
+backend/data/
+backend/.env
+.env
+.env.local
+.env.*.local
+
+# 版本控制与文档
+.git/
+CODE_REVIEW.md
+
+# 系统文件
+.DS_Store
+*.log

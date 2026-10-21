@@ -1,28 +1,47 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from "vue";
+import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { Search, Plus, Refresh } from "@element-plus/icons-vue";
+import { apiUrl } from "../../api/base";
+import { ROLE_LABELS } from "../../stores/user";
+
+type RoleKey = "admin" | "operator" | "viewer";
 
 interface UserRow {
-  id: number;
+  username: string;
   name: string;
-  email: string;
-  role: string;
-  status: "启用" | "禁用";
-  createdAt: string;
+  role: RoleKey;
+  enabled?: boolean;
 }
 
-// 模拟数据源
-const allUsers = ref<UserRow[]>([
-  { id: 1, name: "张三", email: "zhangsan@example.com", role: "管理员", status: "启用", createdAt: "2026-01-12" },
-  { id: 2, name: "李四", email: "lisi@example.com", role: "普通用户", status: "启用", createdAt: "2026-02-03" },
-  { id: 3, name: "王五", email: "wangwu@example.com", role: "普通用户", status: "禁用", createdAt: "2026-03-18" },
-  { id: 4, name: "赵六", email: "zhaoliu@example.com", role: "运营", status: "启用", createdAt: "2026-04-25" },
-  { id: 5, name: "孙七", email: "sunqi@example.com", role: "普通用户", status: "启用", createdAt: "2026-05-09" },
-  { id: 6, name: "周八", email: "zhouba@example.com", role: "运营", status: "禁用", createdAt: "2026-06-14" },
-  { id: 7, name: "吴九", email: "wujiu@example.com", role: "普通用户", status: "启用", createdAt: "2026-07-21" },
-]);
+/** 真实数据源：服务端用户表（backend/auth.mjs），不再是页面内假数据 */
+const allUsers = ref<UserRow[]>([]);
+const loading = ref(false);
+const saving = ref(false);
+
+/** 状态字段：服务端只有 enabled，这里映射成中文标签便于展示 */
+function statusOf(u: UserRow): "启用" | "禁用" {
+  return u.enabled === false ? "禁用" : "启用";
+}
+
+async function loadUsers() {
+  loading.value = true;
+  try {
+    const res = await fetch(apiUrl("/api/users"), { credentials: "include" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      ElMessage.error(body?.error || `加载用户失败（${res.status}）`);
+      return;
+    }
+    allUsers.value = (body.users || []).map((u: UserRow) => ({ ...u, enabled: u.enabled !== false }));
+  } catch {
+    ElMessage.error("无法连接后端服务，用户列表不可用");
+  } finally {
+    loading.value = false;
+  }
+}
+onMounted(loadUsers);
 
 // 搜索与筛选
 const keyword = ref("");
@@ -35,11 +54,9 @@ const pageSize = ref(5);
 // 过滤后的数据
 const filteredUsers = computed(() =>
   allUsers.value.filter((u) => {
-    const matchKeyword =
-      !keyword.value ||
-      u.name.includes(keyword.value) ||
-      u.email.includes(keyword.value);
-    const matchStatus = !statusFilter.value || u.status === statusFilter.value;
+    const k = keyword.value.trim();
+    const matchKeyword = !k || u.name.includes(k) || u.username.includes(k) || ROLE_LABELS[u.role].includes(k);
+    const matchStatus = !statusFilter.value || statusOf(u) === statusFilter.value;
     return matchKeyword && matchStatus;
   })
 );
@@ -55,69 +72,102 @@ const dialogVisible = ref(false);
 const dialogTitle = ref("新增用户");
 const formRef = ref<FormInstance>();
 const form = reactive({
-  id: 0,
+  username: "",
   name: "",
-  email: "",
-  role: "普通用户",
+  role: "viewer" as RoleKey,
+  password: "",
   status: "启用" as "启用" | "禁用",
 });
 
 const rules: FormRules = {
-  name: [{ required: true, message: "请输入用户名", trigger: "blur" }],
-  email: [
-    { required: true, message: "请输入邮箱", trigger: "blur" },
-    { type: "email", message: "邮箱格式不正确", trigger: "blur" },
+  username: [
+    { required: true, message: "请输入用户名", trigger: "blur" },
+    { pattern: /^[A-Za-z][A-Za-z0-9_]{2,31}$/, message: "3-32 位字母/数字/下划线，以字母开头", trigger: "blur" },
   ],
+  name: [{ required: true, message: "请输入显示名称", trigger: "blur" }],
+  password: [{ min: 6, message: "密码至少 6 位", trigger: "blur" }],
 };
 
 function openAdd() {
+  isEdit.value = false;
   dialogTitle.value = "新增用户";
-  Object.assign(form, { id: 0, name: "", email: "", role: "普通用户", status: "启用" });
+  Object.assign(form, { username: "", name: "", role: "viewer", password: "", status: "启用" });
   dialogVisible.value = true;
 }
+
+const isEdit = ref(false);
 
 function openEdit(row: UserRow) {
+  isEdit.value = true;
   dialogTitle.value = "编辑用户";
-  Object.assign(form, { ...row });
+  Object.assign(form, { ...row, password: "", status: statusOf(row) });
   dialogVisible.value = true;
 }
 
-function submitForm() {
-  formRef.value?.validate((valid) => {
-    if (!valid) return;
-    if (form.id === 0) {
-      const newId = Math.max(0, ...allUsers.value.map((u) => u.id)) + 1;
-      allUsers.value.unshift({
-        id: newId,
-        name: form.name,
-        email: form.email,
-        role: form.role,
-        status: form.status,
-        createdAt: new Date().toISOString().slice(0, 10),
+async function submitForm() {
+  const valid = await formRef.value?.validate().catch(() => false);
+  if (!valid || saving.value) return;
+  saving.value = true;
+  try {
+    let res: Response;
+    if (!isEdit.value) {
+      // 新增：服务端校验用户名唯一/角色合法/密码长度
+      res = await fetch(apiUrl("/api/users"), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: form.username, name: form.name, role: form.role, password: form.password }),
       });
-      ElMessage.success("新增成功");
     } else {
-      const idx = allUsers.value.findIndex((u) => u.id === form.id);
-      if (idx !== -1) {
-        allUsers.value[idx] = { ...allUsers.value[idx], ...form };
-      }
-      ElMessage.success("修改成功");
+      const patch: Record<string, unknown> = { name: form.name, role: form.role, enabled: form.status === "启用" };
+      if (form.password) patch.password = form.password;
+      res = await fetch(apiUrl(`/api/users/${encodeURIComponent(form.username)}`), {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
     }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      ElMessage.error(body?.error || `保存失败（${res.status}）`);
+      return;
+    }
+    ElMessage.success(isEdit.value ? "修改成功" : "新增成功");
     dialogVisible.value = false;
-  });
+    await loadUsers();
+  } catch {
+    ElMessage.error("无法连接后端服务");
+  } finally {
+    saving.value = false;
+  }
 }
 
-function handleDelete(row: UserRow) {
-  ElMessageBox.confirm(`确定要删除用户「${row.name}」吗？`, "提示", {
-    type: "warning",
-    confirmButtonText: "确定",
-    cancelButtonText: "取消",
-  })
-    .then(() => {
-      allUsers.value = allUsers.value.filter((u) => u.id !== row.id);
-      ElMessage.success("删除成功");
-    })
-    .catch(() => {});
+async function handleDelete(row: UserRow) {
+  try {
+    await ElMessageBox.confirm(`确定要删除用户「${row.name}」吗？`, "提示", {
+      type: "warning",
+      confirmButtonText: "确定",
+      cancelButtonText: "取消",
+    });
+  } catch {
+    return;
+  }
+  try {
+    const res = await fetch(apiUrl(`/api/users/${encodeURIComponent(row.username)}`), {
+      method: "DELETE",
+      credentials: "include",
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      ElMessage.error(body?.error || `删除失败（${res.status}）`);
+      return;
+    }
+    ElMessage.success("删除成功");
+    await loadUsers();
+  } catch {
+    ElMessage.error("无法连接后端服务");
+  }
 }
 
 function resetSearch() {
@@ -156,23 +206,21 @@ function resetSearch() {
       </div>
 
       <!-- 用户表格 -->
-      <el-table :data="pagedUsers" style="width: 100%" class="mt16">
-        <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column prop="name" label="用户名" width="120" />
-        <el-table-column prop="email" label="邮箱" min-width="200" />
+      <el-table v-loading="loading" :data="pagedUsers" style="width: 100%" class="mt16">
+        <el-table-column prop="username" label="登录名" width="140" />
+        <el-table-column prop="name" label="显示名称" min-width="160" />
         <el-table-column prop="role" label="角色" width="120">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{ row.role }}</el-tag>
+            <el-tag size="small" effect="plain">{{ ROLE_LABELS[row.role as RoleKey] }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
+        <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="row.status === '启用' ? 'success' : 'info'" size="small">
-              {{ row.status }}
+            <el-tag :type="statusOf(row) === '启用' ? 'success' : 'info'" size="small">
+              {{ statusOf(row) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="createdAt" label="创建时间" width="130" />
         <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(row)">
@@ -204,17 +252,25 @@ function resetSearch() {
     <!-- 新增 / 编辑对话框 -->
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="440px">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="80px">
-        <el-form-item label="用户名" prop="name">
-          <el-input v-model="form.name" placeholder="请输入用户名" />
+        <el-form-item label="登录名" prop="username">
+          <el-input v-model="form.username" placeholder="用于登录，创建后不可修改" :disabled="isEdit" />
         </el-form-item>
-        <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" placeholder="请输入邮箱" />
+        <el-form-item label="显示名称" prop="name">
+          <el-input v-model="form.name" placeholder="如：王工程师" />
+        </el-form-item>
+        <el-form-item :label="isEdit ? '重置密码' : '密码'" prop="password">
+          <el-input
+            v-model="form.password"
+            type="password"
+            show-password
+            :placeholder="isEdit ? '留空则不修改' : '至少 6 位'"
+          />
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width: 100%">
-            <el-option label="管理员" value="管理员" />
-            <el-option label="运营" value="运营" />
-            <el-option label="普通用户" value="普通用户" />
+            <el-option label="管理员" value="admin" />
+            <el-option label="工程师" value="operator" />
+            <el-option label="访客" value="viewer" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
@@ -226,7 +282,7 @@ function resetSearch() {
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitForm">确定</el-button>
+        <el-button type="primary" :loading="saving" @click="submitForm">确定</el-button>
       </template>
     </el-dialog>
   </div>
