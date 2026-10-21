@@ -386,11 +386,17 @@ let pollTimer: number | undefined;
 
 /** 聚焦时间点：从告警跳转时传入，曲线窗口以该时刻为中心 */
 const chartFocusTime = ref<number>(0);
+/** 无数据时的原因说明（显示在图表下方） */
+const chartEmptyReason = ref<string>("");
 
 async function openChart(device: IotDevice, focusTime?: number) {
   chartDevice.value = device;
-  chartKey.value = (device.points || [])[0]?.key || "temperature";
+  // 默认选中「可采集」的点位：只写点位（仅 command）不会有采集数据，
+  // 若默认选它，曲线一片空白会让人误以为系统故障。
+  const readable = (device.points || []).filter((p) => p.query || p.register !== undefined);
+  chartKey.value = readable[0]?.key || (device.points || [])[0]?.key || "temperature";
   chartFocusTime.value = Number(focusTime) || 0;
+  chartEmptyReason.value = "";
   // 修复：原先无条件重置 chartRange，导致点击「1 小时/24 小时」后被立刻改回「实时」，
   // 表现为"点了没反应"。现在只在从外部跳转（带 focusTime）或首次打开时初始化。
   if (chartFocusTime.value) {
@@ -449,6 +455,39 @@ async function renderChart() {
   const ptLabel = (chartDevice.value.points || []).find((p) => p.key === chartKey.value)?.label || chartKey.value;
   const ptUnit = (chartDevice.value.points || []).find((p) => p.key === chartKey.value)?.unit || "";
   const title = `${chartDevice.value.name} · ${ptLabel}${ptUnit ? `（${ptUnit}）` : ""}`;
+
+  // 空数据时给出明确原因，而不是一片空白
+  const hasValue = values.some((v) => v !== null && v !== undefined);
+  const pt = (chartDevice.value.points || []).find((p) => p.key === chartKey.value);
+  const isWriteOnly = pt && !pt.query && pt.register === undefined;
+  if (!hasValue) {
+    let reason = "所选时间范围内没有采集数据";
+    if (isWriteOnly) {
+      reason = `「${ptLabel}」是只写点位（仅配置了下发命令），设备不会回传它的实时值，因此没有曲线数据。请切换到温度/湿度等可采集点位查看。`;
+    } else if (!history.length) {
+      reason = rangeMin
+        ? "所选时间范围内没有采集记录。该设备可能刚开始采集，或自动采集未开启。"
+        : "暂无实时数据。请确认设备已启动自动采集，或切换到历史模式查看数据库记录。";
+    } else {
+      reason = `这段时间内的采集点中没有「${ptLabel}」的值。`;
+    }
+    chartEmptyReason.value = reason;
+    chart.setOption(
+      {
+        ...chartOption("line", labels, [], "#409eff", title),
+        series: [],
+        graphic: {
+          type: "text",
+          left: "center",
+          top: "middle",
+          style: { text: "暂无数据", fill: "#c0c4cc", fontSize: 16 },
+        },
+      } as any,
+      true,
+    );
+    return;
+  }
+  chartEmptyReason.value = "";
   chart.setOption(chartOption("line", labels, values, "#409eff", title), true);
 }
 function closeChart() {
@@ -782,9 +821,12 @@ function statusTag(s: string) {
         </el-radio-group>
       </div>
       <el-radio-group v-model="chartKey" size="small" style="margin-bottom: 10px" @change="renderChart">
-        <el-radio-button v-for="p in chartDevice?.points || []" :key="p.key" :value="p.key">{{ p.label || p.key }}</el-radio-button>
+        <el-radio-button v-for="p in chartDevice?.points || []" :key="p.key" :value="p.key">
+          {{ p.label || p.key }}{{ p.query || p.register !== undefined ? "" : "（不可采集）" }}
+        </el-radio-button>
       </el-radio-group>
       <div ref="chartEl" class="live-chart"></div>
+      <el-alert v-if="chartEmptyReason" type="info" :closable="false" show-icon class="focus-alert" :title="chartEmptyReason" />
       <el-alert
         v-if="chartFocusTime"
         type="warning"
