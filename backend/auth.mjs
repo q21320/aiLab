@@ -62,6 +62,11 @@ const ROUTE_RULES = [
   { method: "POST", prefix: "/api/iot/simulator", minRole: "operator" },
   // 运维设置（留存天数等）
   { method: "PUT", prefix: "/api/iot/settings", minRole: "operator" },
+  // 告警通知配置（含 Webhook 地址）的读/改/测试：仅管理员
+  // 注意：读接口也必须鉴权——配置里含通道结构、最后错误等运维信息
+  { method: "GET", prefix: "/api/iot/notify", minRole: "admin" },
+  { method: "PUT", prefix: "/api/iot/notify", minRole: "admin" },
+  { method: "POST", prefix: "/api/iot/notify", minRole: "admin" },
   // 自动化测试
   { method: "POST", prefix: "/api/autotest", minRole: "operator" },
   // 低代码发布/卸载

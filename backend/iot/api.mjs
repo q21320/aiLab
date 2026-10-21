@@ -20,11 +20,51 @@
 
 import { listDrivers, probeDevice, readDevice, writeDevicePoint } from "./drivers.mjs";
 import { csvText } from "../csv.mjs";
+import { CHANNEL_TYPES } from "./notify.mjs";
 import { startSimulator, stopSimulator, simulatorStatus } from "./simulator.mjs";
 import { createAutoTestEngine } from "./autotest.mjs";
 
 export function createIotExtraRoutes(deps) {
-  const { sendJSON, readBody, getIot, persistIot, broadcast, histories, dataDir, onRealPoint, getOverview, audit, recordPoint, pointStore } = deps;
+  const { sendJSON, readBody, getIot, persistIot, broadcast, histories, dataDir, onRealPoint, getOverview, audit, recordPoint, pointStore, notifier } = deps;
+
+  /** 校验通知配置 */
+  function validateNotifyConfig(cfg) {
+    const errors = [];
+    if (!cfg || typeof cfg !== "object") return ["配置为空"];
+    if (cfg.channels !== undefined && !Array.isArray(cfg.channels)) errors.push("channels 必须是数组");
+    if (cfg.ratePerMinute !== undefined) {
+      const n = Number(cfg.ratePerMinute);
+      if (!Number.isFinite(n) || n < 1 || n > 600) errors.push("每分钟限流需在 1-600 之间");
+    }
+    if (cfg.minLevel !== undefined && !["warn", "error"].includes(cfg.minLevel)) {
+      errors.push("minLevel 只能是 warn 或 error");
+    }
+    const validTypes = CHANNEL_TYPES.map((t) => t.id);
+    for (const [i, ch] of (cfg.channels || []).entries()) {
+      const at = `通道 #${i + 1}`;
+      if (!ch || !validTypes.includes(ch.type)) {
+        errors.push(`${at}：类型不合法（可选：${validTypes.join(" / ")}）`);
+        continue;
+      }
+      if (!ch.id) errors.push(`${at}：缺少 id`);
+      if (ch.type === "smtp") {
+        if (!ch.host) errors.push(`${at}：缺少 SMTP 服务器地址`);
+        if (!ch.from) errors.push(`${at}：缺少发件人地址`);
+        if (!ch.to) errors.push(`${at}：缺少收件人地址`);
+      } else {
+        if (!ch.webhook) errors.push(`${at}：缺少 Webhook 地址`);
+        else {
+          try {
+            const u = new URL(ch.webhook);
+            if (!/^https?:$/.test(u.protocol)) errors.push(`${at}：Webhook 必须是 http(s) 地址`);
+          } catch {
+            errors.push(`${at}：Webhook 地址格式不正确`);
+          }
+        }
+      }
+    }
+    return errors;
+  }
 
   /**
    * 记录采集点：统一走 server.mjs 的 pushHistory（内存缓冲 + 批量落库）。
@@ -289,6 +329,43 @@ export function createIotExtraRoutes(deps) {
         console.error("[iot] 导出失败：", e.message);
         sendJSON(res, 500, { error: "导出失败：" + e.message });
       }
+      return true;
+    }
+
+    // ---------------- 告警通知配置 ----------------
+    if (path === "/api/iot/notify") {
+      if (method === "GET") {
+        sendJSON(res, 200, {
+          ok: true,
+          config: notifier?.publicConfig?.() || null,
+          channelTypes: CHANNEL_TYPES,
+        });
+        return true;
+      }
+      if (method === "PUT") {
+        const body = await readBody(req).catch(() => ({}));
+        // 字段校验
+        const problems = validateNotifyConfig(body);
+        if (problems.length) {
+          sendJSON(res, 400, { error: "配置校验未通过", errors: problems });
+          return true;
+        }
+        await notifier.save(body);
+        if (typeof audit === "function") {
+          const names = (body.channels || []).map((c) => c.name || c.type).join("、") || "无";
+          await audit(req, { module: "物联", action: "通知配置", detail: `更新告警通知配置（启用=${!!body.enabled}，通道：${names}）` });
+        }
+        sendJSON(res, 200, { ok: true, config: notifier.publicConfig() });
+        return true;
+      }
+    }
+
+    // 发送测试消息（验证通道配置）
+    const testMatch = path.match(/^\/api\/iot\/notify\/test\/([^/]+)$/);
+    if (method === "POST" && testMatch) {
+      const cid = decodeURIComponent(testMatch[1]);
+      const r = await notifier.testChannel(cid);
+      sendJSON(res, r.ok ? 200 : 400, r);
       return true;
     }
 

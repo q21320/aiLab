@@ -41,6 +41,7 @@ import { readDevice } from "./iot/drivers.mjs";
 import { validateDevice, normalizeDevice } from "./iot/validate.mjs";
 import { createAlertStore } from "./iot/alerts.mjs";
 import { createPointStore } from "./iot/points.mjs";
+import { createNotifier } from "./iot/notify.mjs";
 import { createAuth, ROLE_LABELS } from "./auth.mjs";
 import { createDatabase } from "./db.mjs";
 import { paths } from "./paths.mjs";
@@ -230,6 +231,9 @@ const db = await createDatabase({ dataDir: paths.dataDir });
 const alertStore = createAlertStore({ db });
 /** 采集点位存储（PostgreSQL）：替代此前只有 200 点的内存环形缓冲 */
 const pointStore = createPointStore({ db });
+/** 告警通知（企微/钉钉/Webhook/SMTP），配置存 kv_documents.alarm_notify */
+const notifier = createNotifier({ db });
+await notifier.load();
 
 // 旧版本把数据存在 JSON 文件里；首次切到数据库时自动迁移（幂等：表里已有数据则跳过）
 await migrateLegacyJson();
@@ -534,6 +538,8 @@ async function registerAlert(device, point) {
     // 完全相同的告警已处于 open 状态时不重复生成（查数据库，而非内存）
     if (await alertStore.hasOpen(device.id, alert.message)) return null;
     const record = await alertStore.insert(device, alert.level, alert.message);
+    // 异步推送通知，失败不影响告警入库
+    void notifier.notify(record).catch((e) => console.error("[notify] 推送失败：", e.message));
     // 内存缓存仅保留最近 N 条（供 SSE/概览），数据库保留全部历史
     iotState.alerts.unshift(record);
     if (iotState.alerts.length > 200) iotState.alerts.length = 200;
@@ -726,6 +732,8 @@ const iotExtra = createIotExtraRoutes({
   recordPoint: (device, point) => pushHistory(device, point),
   // 历史查询（数据库）
   pointStore,
+  // 告警通知
+  notifier,
   dataDir: paths.dataDir,
   // 真实设备读数走与模拟设备完全相同的链路：回写状态 → 历史 → 告警 → 概览
   onRealPoint: async (device, point) => {

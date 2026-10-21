@@ -243,6 +243,46 @@ export function updateIotSettings(retentionDays: number): Promise<{ ok: boolean;
   return request(`${BASE}/settings`, { method: "PUT", body: JSON.stringify({ retentionDays }) });
 }
 
+// ---------------------------------------------------------------------------
+// 告警通知配置
+// ---------------------------------------------------------------------------
+export interface NotifyChannel {
+  id: string;
+  type: "wecom" | "dingtalk" | "webhook" | "smtp";
+  name?: string;
+  enabled?: boolean;
+  webhook?: string;
+  secret?: string;
+  host?: string;
+  port?: number | string;
+  secure?: boolean;
+  user?: string;
+  pass?: string;
+  from?: string;
+  to?: string;
+  lastError?: string;
+  lastSentAt?: number;
+}
+
+export interface NotifyConfig {
+  enabled: boolean;
+  minLevel: "warn" | "error";
+  ratePerMinute: number;
+  channels: NotifyChannel[];
+}
+
+export function fetchNotifyConfig(): Promise<{ ok: boolean; config: NotifyConfig; channelTypes: any[] } | null> {
+  return request(`${BASE}/notify`);
+}
+
+export function saveNotifyConfig(cfg: NotifyConfig): Promise<{ ok: boolean; config: NotifyConfig } | null> {
+  return request(`${BASE}/notify`, { method: "PUT", body: JSON.stringify(cfg) });
+}
+
+export function testNotifyChannel(id: string): Promise<{ ok: boolean; error?: string } | null> {
+  return request(`${BASE}/notify/test/${encodeURIComponent(id)}`, { method: "POST" });
+}
+
 /** 导出采集数据 CSV（按设备与时间范围） */
 export function exportPointsCsv(deviceId: string, from: number, to: number): string {
   return `${BASE}/points/export.csv?deviceId=${encodeURIComponent(deviceId)}&from=${from}&to=${to}`;
