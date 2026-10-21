@@ -100,33 +100,68 @@ export function createIotExtraRoutes(deps) {
     }
   }
 
+  /** 采集批次累加器：deviceId -> { device, time, data, units, timer } */
+  // 必须在 engine 创建之前声明：onPoint 回调闭包引用它，提前声明避免 TDZ
+  const pointAccumulator = new Map();
+
   const engine = createAutoTestEngine({
     dataFile: `${dataDir}/autotest.json`,
     onEvent: (payload) => broadcast({ autotest: payload }),
     // 供 mock 驱动取最近点位（函数声明会提升，可在下方定义）
     getLatestPoints: (deviceId) => latestPointsOf(deviceId),
     onPoint: (device, key, value, unit) => {
-      // 真实设备采集点进入统一实时流（大屏/仪表盘同一契约）
-      const point = {
-        deviceId: device.id,
-        deviceName: device.name,
-        type: device.type || "test",
-        time: Date.now(),
-        temperature: key === "temperature" ? value : undefined,
-        humidity: key === "humidity" ? value : undefined,
-        power: key === "power" ? value : undefined,
-        [key]: value,
-        unit: unit || "",
+      // 问题：自动化测试每读一个点位就回调一次，原实现每次直接写一条历史记录，
+      // 导致「一次采集」被拆成多条（每个点位一行、其余字段为空），
+      // 曲线图上表现为同一时刻多个点、数据断断续续。
+      // 修复：按「设备 + 采集时刻」聚合，短时间内（默认 1.5 秒）的同批点位合并为一条记录。
+      const now = Date.now();
+      const acc = pointAccumulator.get(device.id);
+      if (acc && now - acc.time < 1500) {
+        // 同一批：合并到已有记录
+        acc.data[key] = value;
+        if (unit) acc.units[key] = unit;
+        acc.time = now;
+        return;
+      }
+      // 新的一批：先把上一批提交，再开始新的累积
+      if (acc) flushAccumulator(acc, device);
+      const fresh = {
+        device,
+        time: now,
+        data: { [key]: value },
+        units: unit ? { [key]: unit } : {},
+        timer: null,
       };
-      record(device, point);
-      // 修复：真实设备读数原先只进 SSE，不回写设备状态、也不触发告警，
-      // 导致大屏/历史曲线永远是 baseTemp 静态值、真实超限永不告警。
-      // 现在统一走 onRealPoint（回写当前值 + 阈值判定），并把真实点位算进概览。
-      if (typeof onRealPoint === "function") onRealPoint(device, point);
-      const overview = typeof getOverview === "function" ? getOverview([point]) : null;
-      broadcast({ devices: getIot().devices, points: [point], overview, alerts: getIot().alerts });
+      fresh.timer = setTimeout(() => {
+        if (pointAccumulator.get(device.id) === fresh) {
+          pointAccumulator.delete(device.id);
+          flushAccumulator(fresh, device);
+        }
+      }, 1500);
+      if (typeof fresh.timer.unref === "function") fresh.timer.unref();
+      pointAccumulator.set(device.id, fresh);
     },
   });
+
+  /** 提交一个采集批次：合并为**一条**记录（含本次采集的所有点位） */
+  function flushAccumulator(acc, device) {
+    if (acc.timer) clearTimeout(acc.timer);
+    const point = {
+      deviceId: device.id,
+      deviceName: device.name,
+      type: device.type || "test",
+      time: acc.time,
+      ...acc.data,
+    };
+    // 单位取主点位的（保留兼容字段），完整信息在 values 中
+    const firstUnit = Object.values(acc.units)[0];
+    if (firstUnit) point.unit = firstUnit;
+
+    record(device, point);
+    if (typeof onRealPoint === "function") onRealPoint(device, point);
+    const overview = typeof getOverview === "function" ? getOverview([point]) : null;
+    broadcast({ devices: getIot().devices, points: [point], overview, alerts: getIot().alerts });
+  }
 
   function findDevice(id) {
     return getIot().devices.find((d) => d.id === id) || null;

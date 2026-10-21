@@ -62,25 +62,29 @@ export function createPoller({ readDevice, getDevices, onPoints, onStatusChange,
       const result = await readDevice(device);
       const values = result?.values || {};
       const now = Date.now();
-      const points = [];
 
+      // 修复：原来每个点位 push 一个独立 point，一次采集（3 个点位）会写入 3 条记录，
+      // 每条只有一个字段有值，导致曲线上同一时刻出现多个点、数据断开。
+      // 现在把「一次采集读取到的所有点位」合并为**一个** point 对象。
+      const merged = {
+        deviceId: device.id,
+        deviceName: device.name,
+        type: device.type || "test",
+        time: now,
+      };
+      const units = {};
+      let hasValue = false;
       for (const [key, v] of Object.entries(values)) {
         if (typeof v?.value !== "number" || !Number.isFinite(v.value)) continue;
-        points.push({
-          deviceId: device.id,
-          deviceName: device.name,
-          type: device.type || "test",
-          time: now,
-          temperature: key === "temperature" ? v.value : undefined,
-          humidity: key === "humidity" ? v.value : undefined,
-          power: key === "power" ? v.value : undefined,
-          [key]: v.value,
-          unit: v.unit || "",
-        });
+        // 所有点位都写入同一个对象（temperature/humidity/power 及自定义 key）
+        merged[key] = v.value;
+        if (v.unit) units[key] = v.unit;
+        hasValue = true;
       }
 
-      if (points.length) {
-        onPoints?.(device, points);
+      if (hasValue) {
+        if (Object.keys(units).length) merged.units = units;
+        onPoints?.(device, [merged]);
       }
 
       // 通信成功：状态恢复、清错误、重置退避
