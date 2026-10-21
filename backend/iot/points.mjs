@@ -124,7 +124,22 @@ export function createPointStore({ db }) {
         LIMIT $4`,
       [deviceId, start, end, max],
     );
-    return r.rows.map(toPoint).reverse(); // 按时间正序返回
+    // 兼容历史数据：修复前「一次采集」被拆成多行（每个点位一行，其余为空），
+    // 这里把同一秒内的多行合并为一个点，避免曲线出现同刻多点与断线。
+    const merged = new Map();
+    for (const row of r.rows) {
+      const p = toPoint(row);
+      const sec = Math.floor(p.time / 1000);
+      const cur = merged.get(sec);
+      if (!cur) {
+        merged.set(sec, p);
+        continue;
+      }
+      for (const [k, v] of Object.entries(p)) {
+        if (v !== undefined && v !== null && cur[k] === undefined) cur[k] = v;
+      }
+    }
+    return [...merged.values()].sort((a, b) => a.time - b.time);
   }
 
   /** 最近 N 个点（用于启动时恢复内存缓存/实时曲线） */
