@@ -16,39 +16,42 @@ function indent(n: number): string {
 function renderControl(f: FormSchema["fields"][number], lv: number): string {
   const pad = indent(lv);
   const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : "";
+  // 修复：原来只有 input 类型导出 disabled，其它控件勾选「禁用」后导出仍可交互。
+  // 统一在此生成 disabled 属性，保证所有控件行为一致。
+  const dis = f.disabled ? " disabled" : "";
   switch (f.type) {
     case "input":
-      return `${pad}<el-input v-model="form.${f.name}"${ph}${f.disabled ? " disabled" : ""} />`;
+      return `${pad}<el-input v-model="form.${f.name}"${ph}${dis} />`;
     case "textarea":
-      return `${pad}<el-input v-model="form.${f.name}" type="textarea" :rows="${f.props?.rows || 3}"${ph} />`;
+      return `${pad}<el-input v-model="form.${f.name}" type="textarea" :rows="${f.props?.rows || 3}"${ph}${dis} />`;
     case "number":
-      return `${pad}<el-input-number v-model="form.${f.name}" :min="${f.props?.min ?? 0}" :max="${f.props?.max ?? 9999}" />`;
+      return `${pad}<el-input-number v-model="form.${f.name}" :min="${f.props?.min ?? 0}" :max="${f.props?.max ?? 9999}"${dis} />`;
     case "select": {
       const opts = (f.options || [])
         .map((o) => `${indent(lv + 1)}<el-option label="${esc(o.label)}" :value='${JSON.stringify(o.value)}' />`)
         .join("\n");
-      return `${pad}<el-select v-model="form.${f.name}"${ph}>${f.options?.length ? "\n" + opts + "\n" + pad : ""}</el-select>`;
+      return `${pad}<el-select v-model="form.${f.name}"${ph}${dis}>${f.options?.length ? "\n" + opts + "\n" + pad : ""}</el-select>`;
     }
     case "radio": {
       const opts = (f.options || [])
         .map((o) => `${indent(lv + 1)}<el-radio :label='${JSON.stringify(o.value)}'>${esc(o.label)}</el-radio>`)
         .join("\n");
-      return `${pad}<el-radio-group v-model="form.${f.name}">\n${opts}\n${pad}</el-radio-group>`;
+      return `${pad}<el-radio-group v-model="form.${f.name}"${dis}>\n${opts}\n${pad}</el-radio-group>`;
     }
     case "checkbox": {
       const opts = (f.options || [])
         .map((o) => `${indent(lv + 1)}<el-checkbox :label='${JSON.stringify(o.value)}'>${esc(o.label)}</el-checkbox>`)
         .join("\n");
-      return `${pad}<el-checkbox-group v-model="form.${f.name}">\n${opts}\n${pad}</el-checkbox-group>`;
+      return `${pad}<el-checkbox-group v-model="form.${f.name}"${dis}>\n${opts}\n${pad}</el-checkbox-group>`;
     }
     case "date":
-      return `${pad}<el-date-picker v-model="form.${f.name}" type="date"${ph} />`;
+      return `${pad}<el-date-picker v-model="form.${f.name}" type="date"${ph}${dis} />`;
     case "switch":
-      return `${pad}<el-switch v-model="form.${f.name}" />`;
+      return `${pad}<el-switch v-model="form.${f.name}"${dis} />`;
     case "rating":
-      return `${pad}<el-rate v-model="form.${f.name}" :max="${f.props?.max ?? 5}" />`;
+      return `${pad}<el-rate v-model="form.${f.name}" :max="${f.props?.max ?? 5}"${dis} />`;
     case "slider":
-      return `${pad}<el-slider v-model="form.${f.name}" :min="${f.props?.min ?? 0}" :max="${f.props?.max ?? 100}" />`;
+      return `${pad}<el-slider v-model="form.${f.name}" :min="${f.props?.min ?? 0}" :max="${f.props?.max ?? 100}"${dis} />`;
     case "upload":
       return `${pad}<el-upload action=""><el-button>上传文件</el-button></el-upload>`;
     case "text":

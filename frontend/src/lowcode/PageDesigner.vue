@@ -280,6 +280,15 @@ async function handleGenerate() {
     ElMessage.warning("请输入描述或上传图片");
     return;
   }
+  // 修复：原先上传的图片被完全忽略，只传 prompt，用户只传图时生成空壳页面。
+  // 当前后端代理为纯文本模型，不支持图像输入，因此明确告知而不是静默忽略。
+  if (uploadFiles.value.length > 0 && !prompt.value.trim()) {
+    ElMessage.warning("当前 AI 生成仅支持文字描述，请补充页面描述（参考图功能暂未接入多模态模型）");
+    return;
+  }
+  if (uploadFiles.value.length > 0) {
+    ElMessage.info("参考图暂不参与生成，本次仅根据文字描述生成页面");
+  }
   generating.value = true;
   matched.value = "";
   try {
@@ -483,7 +492,7 @@ snapshot();
     <!-- AI 生成对话框 -->
     <el-dialog v-model="aiVisible" title="AI 页面生成" width="640px" top="8vh">
       <p class="ai-desc">
-        用自然语言描述页面需求（或上传参考图），AI 将生成可继续拖拽编辑的页面结构。
+        用自然语言描述页面需求，AI 将生成可继续拖拽编辑的页面结构。
       </p>
       <el-input
         v-model="prompt"

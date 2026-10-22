@@ -112,31 +112,33 @@ const text = computed<string>({
   set: (v) => { if (props.node) props.node.text = v; },
 });
 
-/** 选项 <-> 逗号文本 */
-function optionsField(key: string) {
-  return computed<string>({
-    get: () => (props.node?.props?.[key] || []).join(", "),
-    set: (v) => {
-      if (!props.node) return;
-      props.node.props = props.node.props || {};
-      props.node.props[key] = v
-        .split(/[,，]/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-    },
-  });
+/**
+ * 选项数组 <-> 逗号文本。
+ * 原来每次调用都新建一个 computed（未被任何视图追踪），改成普通读写函数，
+ * 行为更直白、也不会产生"读取碰巧正确"的隐性依赖。
+ */
+function getOptions(key: string): string {
+  return (props.node?.props?.[key] || []).join(", ");
+}
+function setOptions(key: string, v: string) {
+  if (!props.node) return;
+  props.node.props = props.node.props || {};
+  props.node.props[key] = String(v || "")
+    .split(/[,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** 取字段显示值（options 控件显示逗号文本） */
 function fieldGet(f: FieldDef): any {
-  if (f.control === "options") return optionsField(f.key).value;
+  if (f.control === "options") return getOptions(f.key);
   return props.node?.props?.[f.key];
 }
 
 /** 写字段值（options 控件解析逗号文本） */
 function fieldSet(f: FieldDef, v: any) {
   if (f.control === "options") {
-    optionsField(f.key).value = v;
+    setOptions(f.key, v);
     return;
   }
   if (!props.node) return;
@@ -237,16 +239,39 @@ function setCustomStyle(k: string, v: string) {
   if (v) props.node.style[k] = v;
   else delete props.node.style[k];
 }
+/** 常用 CSS 键建议（与 sanitize.ts 白名单保持一致） */
+const COMMON_STYLE_KEYS = [
+  "display", "flexDirection", "justifyContent", "alignItems", "gap",
+  "width", "height", "minHeight", "maxWidth", "padding", "margin",
+  "fontSize", "fontWeight", "color", "background", "borderRadius",
+  "boxShadow", "border", "textAlign", "lineHeight", "opacity",
+  "overflow", "letterSpacing", "transform",
+];
+
 function addCustomStyle() {
   if (!props.node) return;
   props.node.style = props.node.style || {};
+  // 用一个不会与真实 CSS 键冲突的临时键，用户随后在输入框里改成真实键名
   let i = 1;
-  let key = "custom1";
+  let key = "__new1";
   while (props.node.style[key] !== undefined) {
     i += 1;
-    key = `custom${i}`;
+    key = `__new${i}`;
   }
   props.node.style[key] = "";
+}
+
+/**
+ * 重命名自定义样式键。
+ * 修复：原来键名输入框是 disabled 的，生成的 custom1 这类键会被
+ * sanitize.ts 白名单丢弃，实际完全无效。
+ */
+function renameCustomStyle(oldKey: string, newKey: string) {
+  const style = props.node?.style;
+  if (!style || !newKey || oldKey === newKey) return;
+  const value = style[oldKey];
+  delete style[oldKey];
+  style[newKey] = value;
 }
 function removeCustomStyle(k: string) {
   setCustomStyle(k, "");
@@ -386,12 +411,26 @@ const compTip = computed(() => getPageComponent(props.node?.type || ("" as any))
       <!-- 自定义样式 -->
       <el-divider class="divider">高级样式</el-divider>
       <div v-for="cs in customStyles" :key="cs.k" class="col-row">
-        <el-input v-model="cs.k" size="small" disabled style="width: 110px" />
+        <el-select
+          :model-value="cs.k"
+          size="small"
+          filterable
+          allow-create
+          default-first-option
+          placeholder="CSS 键"
+          style="width: 140px"
+          @change="(v: string) => renameCustomStyle(cs.k, v)"
+        >
+          <el-option v-for="k in COMMON_STYLE_KEYS" :key="k" :label="k" :value="k" />
+        </el-select>
         <el-input v-model="cs.v" size="small" placeholder="值" style="flex: 1" @change="setCustomStyle(cs.k, $event)" />
         <el-button size="small" text type="danger" @click="removeCustomStyle(cs.k)">删</el-button>
       </div>
       <el-button size="small" style="width: 100%" @click="addCustomStyle">+ 添加样式键</el-button>
-      <p class="hint">支持任意 CSS 键，如 display、flexDirection、justifyContent、borderRadius。</p>
+      <p class="hint">
+        键名可编辑（下拉可选常用键或直接输入）。注意：仅白名单内的 CSS 属性会生效，
+        <code>url()</code>、<code>position:fixed</code> 等出于安全考虑会被过滤。
+      </p>
     </template>
 
     <el-empty v-else description="点击画布中的组件进行编辑" :image-size="90" />

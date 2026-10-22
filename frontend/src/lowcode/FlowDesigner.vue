@@ -199,6 +199,24 @@ function cancelConnect() {
   connecting.source = "";
 }
 
+/**
+ * 全局 mouseup：连线拖到空白处松手时取消。
+ * 修复前用节点上的 @mouseleave 取消连线，导致鼠标离开源节点的瞬间
+ * connecting.active 就被置 false，任何连线都无法完成。
+ */
+function onWindowMouseUpForConnect() {
+  if (!connecting.active) return;
+  // 节点上的 @mouseup 先于 window 的冒泡阶段执行（前者是目标阶段）；
+  // 但为避免依赖事件顺序，这里延迟到下一个宏任务再判断：
+  // 若节点已处理则 active 已为 false，不会误取消。
+  setTimeout(() => {
+    if (connecting.active) cancelConnect();
+  }, 0);
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("mouseup", onWindowMouseUpForConnect);
+}
+
 // ---------------------------------------------------------------------------
 // 边 / 节点操作
 // ---------------------------------------------------------------------------
@@ -388,6 +406,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("mousemove", onWindowMouseMove);
   window.removeEventListener("mouseup", onWindowMouseUp);
+  window.removeEventListener("mouseup", onWindowMouseUpForConnect);
   clearInterval(simulateTimer);
 });
 
@@ -559,7 +578,6 @@ const palette = [
             :transform="`translate(${n.x}, ${n.y})`"
             @mousedown.stop.prevent="onNodeMouseDown($event, n)"
             @mouseup.stop.prevent="onNodeConnect($event, n)"
-            @mouseleave="cancelConnect"
           >
             <rect
               v-if="nodeStyle(n.type).shape === 'rect'"
