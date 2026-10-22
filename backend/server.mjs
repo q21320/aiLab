@@ -36,6 +36,7 @@ import { createFormRoutes } from "./forms.mjs";
 import { createCrudRoutes } from "./crud.mjs";
 import { createAuditRoutes } from "./audit.mjs";
 import { createProductionRoutes } from "./production.mjs";
+import { createSampleRoutes } from "./samples.mjs";
 import { createAiRoutes } from "./ai.mjs";
 import { createPoller } from "./iot/poller.mjs";
 import { readDevice } from "./iot/drivers.mjs";
@@ -841,6 +842,17 @@ const crudRoutes = createCrudRoutes({ sendJSON, readBody, db, database: db });
   if (Object.keys(hydrated).length) crudRoutes.hydrate(hydrated);
 }
 
+// 样品管理 · 存储：PostgreSQL kv_documents.samples
+const sampleRoutes = createSampleRoutes({
+  sendJSON,
+  readBody,
+  db,
+  audit: async (req2, entry) => {
+    const actor = await auth.getSession(req2);
+    await auditRoutes.log(entry, actor ? { name: actor.name, role: actor.role } : null);
+  },
+});
+
 // 排产模块（订单/工序/产线/工单/异常）· 存储：PostgreSQL kv_documents.production
 const productionRoutes = createProductionRoutes({
   sendJSON,
@@ -983,6 +995,9 @@ async function handle(req, res) {
 
   // 操作日志（审计）
   if (await auditRoutes(req, res, path, method)) return;
+
+  // 样品管理
+  if (await sampleRoutes(req, res, path, method)) return;
 
   // 排产模块
   if (await productionRoutes(req, res, path, method)) return;
@@ -1255,6 +1270,7 @@ async function handle(req, res) {
       apps,
       iot: iotState,
       production: await readJson("production", null),
+      samples: await readJson("samples", null),
     });
   }
   if (method === "POST" && path === "/api/backup/snapshot") {
@@ -1289,6 +1305,7 @@ async function handle(req, res) {
       await writeJson("apps", apps);
       await writeJson("iot", iotState);
       if (data.production) await writeJson("production", data.production);
+      if (data.samples) await writeJson("samples", data.samples);
       // 恢复表单提交与 CRUD（事务内完成，失败整体回滚）
       await db.transaction(async (client) => {
         if (Array.isArray(data.formSubmissions)) {

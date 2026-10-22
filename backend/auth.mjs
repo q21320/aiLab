@@ -69,6 +69,9 @@ const ROUTE_RULES = [
   { method: "POST", prefix: "/api/iot/notify", minRole: "admin" },
   // 自动化测试
   { method: "POST", prefix: "/api/autotest", minRole: "operator" },
+  // 样品：查看需登录（访客可读），修改需要工程师及以上
+  { method: "GET", prefix: "/api/samples", minRole: "viewer" },
+  { method: "PUT", prefix: "/api/samples", minRole: "operator" },
   // 排产：查看需登录（访客可读），修改需要工程师及以上
   { method: "GET", prefix: "/api/production", minRole: "viewer" },
   { method: "PUT", prefix: "/api/production", minRole: "operator" },

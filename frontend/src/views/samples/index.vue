@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Search, DataAnalysis, Compass } from "@element-plus/icons-vue";
 import {
@@ -12,6 +12,68 @@ import {
 import ReportBlockView from "../../lowcode/ReportBlockView.vue";
 
 const store = useSampleStore();
+
+// 从后端加载样品台账（此前只存 localStorage，换设备会丢）
+onMounted(() => {
+  void store.loadFromServer();
+});
+
+/** 测试合格率（基于结构化判定，历史文本自动推断） */
+const passStats = computed(() => store.passRate());
+
+// ---------------------------------------------------------------------------
+// 编辑样品
+// ---------------------------------------------------------------------------
+const editVisible = ref(false);
+const editForm = reactive({ id: "", name: "", type: "", batch: "", location: "", owner: "", note: "" });
+
+function openEdit(row: any) {
+  Object.assign(editForm, {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    batch: row.batch,
+    location: row.location,
+    owner: row.owner,
+    note: row.note || "",
+  });
+  editVisible.value = true;
+}
+
+function saveEdit() {
+  if (!editForm.name.trim()) {
+    ElMessage.warning("样品名称不能为空");
+    return;
+  }
+  const ok = store.updateSample(editForm.id, {
+    name: editForm.name.trim(),
+    type: editForm.type,
+    batch: editForm.batch,
+    location: editForm.location,
+    owner: editForm.owner,
+    note: editForm.note,
+  });
+  editVisible.value = false;
+  ElMessage.success(ok ? "样品信息已更新" : "更新失败");
+}
+
+// ---------------------------------------------------------------------------
+// 删除样品
+// ---------------------------------------------------------------------------
+async function doRemove(row: any) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除样品「${row.name}」（${row.id}）？\n\n注意：已有测试记录的样品属于质量档案，不允许删除。`,
+      "删除样品",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  const r = store.removeSample(row.id);
+  if (r.ok) ElMessage.success("已删除");
+  else ElMessage.error(r.reason || "删除失败");
+}
 const keyword = ref("");
 const statusFilter = ref<SampleStatus | "all">("all");
 
@@ -157,6 +219,19 @@ function cloneRows() {
 
 <template>
   <div class="samples">
+    <!-- 数据同步状态 -->
+    <div class="sync-row">
+      <el-tag v-if="store.backendOnline === true" type="success" size="small" effect="plain">已同步到数据库</el-tag>
+      <el-tag v-else-if="store.backendOnline === false" type="warning" size="small" effect="plain">
+        仅本地保存（{{ store.lastSyncError || "后端不可达" }}）
+      </el-tag>
+      <el-tag v-else type="info" size="small" effect="plain">加载中…</el-tag>
+      <span class="pass-rate" v-if="passStats.total">
+        测试合格率 <b>{{ passStats.rate }}%</b>
+        <span class="muted">（合格 {{ passStats.pass }} / 不合格 {{ passStats.fail }}<template v-if="passStats.pending"> / 待复检 {{ passStats.pending }}</template>）</span>
+      </span>
+    </div>
+
     <!-- 统计卡 -->
     <div class="stat-cards">
       <div v-for="(st, key) in SAMPLE_STATUS_LABELS" :key="key" class="stat-card" :class="{ active: statusFilter === key }" @click="statusFilter = statusFilter === key ? 'all' : key">
@@ -191,19 +266,36 @@ function cloneRows() {
           <el-tag size="small" :type="SAMPLE_STATUS_LABELS[row.status as SampleStatus].type">{{ SAMPLE_STATUS_LABELS[row.status as SampleStatus].text }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="300" fixed="right">
+      <el-table-column label="操作" width="360" fixed="right">
         <template #default="{ row }">
           <el-button size="small" text type="primary" @click="openDetail(row)">履历</el-button>
+          <el-button size="small" text @click="openEdit(row)">编辑</el-button>
           <el-button v-if="row.status === 'in'" size="small" text type="warning" @click="openTest(row)">开始测试</el-button>
           <el-button v-if="row.status === 'testing'" size="small" text type="warning" @click="openTest(row)">加测</el-button>
           <el-button v-if="row.status === 'testing'" size="small" text type="success" @click="finishTest(row)">完成</el-button>
           <el-button v-if="['in', 'testing', 'done'].includes(row.status)" size="small" text type="primary" @click="doOutbound(row)">出库</el-button>
           <el-button v-if="['in', 'testing'].includes(row.status)" size="small" text type="danger" @click="doScrap(row)">报废</el-button>
+          <el-button v-if="row.status === 'in' && !row.tests.length" size="small" text type="danger" @click="doRemove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
 
     <!-- 入库 -->
+    <!-- 编辑样品 -->
+    <el-dialog v-model="editVisible" title="编辑样品信息" width="520px">
+      <div class="form-field"><label>样品编号</label><el-input v-model="editForm.id" disabled /></div>
+      <div class="form-field"><label>名称</label><el-input v-model="editForm.name" /></div>
+      <div class="form-field"><label>类型</label><el-input v-model="editForm.type" /></div>
+      <div class="form-field"><label>批次</label><el-input v-model="editForm.batch" /></div>
+      <div class="form-field"><label>库位</label><el-input v-model="editForm.location" /></div>
+      <div class="form-field"><label>负责人</label><el-input v-model="editForm.owner" /></div>
+      <div class="form-field"><label>备注</label><el-input v-model="editForm.note" type="textarea" :rows="2" /></div>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveEdit">保存</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="addDialog" title="样品入库登记" width="520px">
       <div class="form-field"><label>样品名称</label><el-input v-model="addForm.name" placeholder="如：铝合金拉伸试样" /></div>
       <div class="form-field">
@@ -293,6 +385,24 @@ function cloneRows() {
 </template>
 
 <style scoped>
+.sync-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.pass-rate {
+  font-size: 13px;
+  color: #606266;
+}
+.pass-rate b {
+  color: #67c23a;
+  font-size: 15px;
+}
+.pass-rate .muted {
+  color: #909399;
+  font-size: 12px;
+}
 .samples {
   display: flex;
   flex-direction: column;
