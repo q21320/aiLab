@@ -37,6 +37,7 @@ import { createCrudRoutes } from "./crud.mjs";
 import { createAuditRoutes } from "./audit.mjs";
 import { createProductionRoutes } from "./production.mjs";
 import { createSampleRoutes } from "./samples.mjs";
+import { createLowcodeProjectsRoutes } from "./lowcode.mjs";
 import { createAiRoutes } from "./ai.mjs";
 import { createPoller } from "./iot/poller.mjs";
 import { readDevice } from "./iot/drivers.mjs";
@@ -842,6 +843,17 @@ const crudRoutes = createCrudRoutes({ sendJSON, readBody, db, database: db });
   if (Object.keys(hydrated).length) crudRoutes.hydrate(hydrated);
 }
 
+// 低代码平台 · 设计器工程（设计态）· 存储：PostgreSQL kv_documents.lowcode_projects
+const lowcodeProjectsRoutes = createLowcodeProjectsRoutes({
+  sendJSON,
+  readBody,
+  db,
+  audit: async (req2, entry) => {
+    const actor = await auth.getSession(req2);
+    await auditRoutes.log(entry, actor ? { name: actor.name, role: actor.role } : null);
+  },
+});
+
 // 样品管理 · 存储：PostgreSQL kv_documents.samples
 const sampleRoutes = createSampleRoutes({
   sendJSON,
@@ -995,6 +1007,9 @@ async function handle(req, res) {
 
   // 操作日志（审计）
   if (await auditRoutes(req, res, path, method)) return;
+
+  // 低代码工程（设计态）
+  if (await lowcodeProjectsRoutes(req, res, path, method)) return;
 
   // 样品管理
   if (await sampleRoutes(req, res, path, method)) return;

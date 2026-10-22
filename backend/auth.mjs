@@ -76,6 +76,9 @@ const ROUTE_RULES = [
   { method: "GET", prefix: "/api/production", minRole: "viewer" },
   { method: "PUT", prefix: "/api/production", minRole: "operator" },
   { method: "POST", prefix: "/api/production", minRole: "operator" },
+  // 低代码工程（设计态）：读取需登录，保存需工程师及以上
+  { method: "GET", prefix: "/api/lowcode/projects", minRole: "viewer" },
+  { method: "PUT", prefix: "/api/lowcode/projects", minRole: "operator" },
   // 低代码发布/卸载
   { method: "POST", prefix: "/api/lowcode/apps", minRole: "operator" },
   { method: "PUT", prefix: "/api/lowcode/apps", minRole: "operator" },

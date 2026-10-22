@@ -11,6 +11,8 @@ import {
   CircleCheck,
   Refresh,
   QuestionFilled,
+  Download,
+  Upload,
 } from "@element-plus/icons-vue";
 import PageDesigner from "../../lowcode/PageDesigner.vue";
 import FormDesigner from "../../lowcode/FormDesigner.vue";
@@ -22,6 +24,8 @@ import { usePublishStore } from "../../lowcode/publish";
 
 const store = useLowcodeStore();
 store.init();
+// 从后端加载工程（此前只存 localStorage，换设备设计稿会丢）
+void store.loadFromServer();
 
 // 当前设计器页签
 const active = ref<"page" | "form" | "flow" | "report" | "screen">("page");
@@ -65,9 +69,69 @@ const TABS = [
 const docVisible = ref(false);
 
 /** 保存全部工程到本地（B/S 前端本地持久层，可切换后端接口） */
+/** 导出全部工程为 JSON（跨环境迁移 / 备份） */
+function exportProjects() {
+  const data = { exportedAt: Date.now(), version: 1, projects: store.projects };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `ailab-lowcode-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  ElMessage.success("工程已导出为 JSON");
+}
+
+/** 导入工程 JSON */
+const importInput = ref<HTMLInputElement | null>(null);
+function pickImport() {
+  importInput.value?.click();
+}
+async function onImportFile(e: Event) {
+  const el = e.target as HTMLInputElement;
+  const file = el.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const projects = parsed?.projects ?? parsed;
+    if (!projects || typeof projects !== "object") throw new Error("文件格式不正确");
+    const hasAny = Object.values(projects).some((v) => v !== null && v !== undefined);
+    if (!hasAny) throw new Error("文件里没有任何工程数据");
+    await ElMessageBox.confirm(
+      "导入将覆盖当前的页面/表单/流程/报表/大屏设计稿，是否继续？（建议先导出备份）",
+      "导入工程",
+      { type: "warning", confirmButtonText: "覆盖导入", cancelButtonText: "取消" },
+    );
+    store.projects = {
+      page: projects.page ?? null,
+      form: projects.form ?? null,
+      flow: projects.flow ?? null,
+      report: projects.report ?? null,
+      screen: projects.screen ?? null,
+    };
+    store.ensureDefaults();
+    store.persist();
+    ElMessage.success("工程已导入");
+  } catch (err: any) {
+    if (err !== "cancel" && err !== "close") ElMessage.error(`导入失败：${err?.message || err}`);
+  } finally {
+    el.value = "";
+  }
+}
+
 function saveAll() {
   store.persist();
-  ElMessage.success("已保存全部工程");
+  // 本地存储超限时必须提示，否则用户以为已保存、关闭页面即丢
+  if (store.storageWarning) {
+    ElMessage.error(`本地保存失败：${store.storageWarning}。请导出 JSON 备份或清理其他工程。`);
+  } else if (store.backendOnline === false) {
+    ElMessage.warning(`已保存到本地，但后端未连接：${store.lastSyncError}`);
+  } else {
+    ElMessage.success("已保存全部工程");
+  }
 }
 
 async function resetAll() {
@@ -123,11 +187,25 @@ function designerFor(key: string) {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+          <el-button size="small" :icon="Download" @click="exportProjects">导出 JSON</el-button>
+          <el-button size="small" :icon="Upload" @click="pickImport">导入 JSON</el-button>
+          <input ref="importInput" type="file" accept=".json,application/json" style="display: none" @change="onImportFile" />
           <el-button size="small" :icon="Refresh" @click="resetAll">重置示例</el-button>
           <el-button size="small" type="primary" :icon="CircleCheck" @click="saveAll">保存全部</el-button>
         </div>
       </div>
     </div>
+
+    <!-- 存储告警（空间不足时醒目提示） -->
+    <el-alert
+      v-if="store.storageWarning"
+      type="error"
+      :closable="false"
+      show-icon
+      class="storage-warn"
+      :title="`本地存储告警：${store.storageWarning}`"
+      description="工程可能无法保存到浏览器。建议先「导出 JSON」备份，或清理不需要的工程。后端已连接时数据仍会同步到数据库。"
+    />
 
     <!-- 设计器主体（KeepAlive 保持各设计器状态） -->
     <div class="platform-body">
@@ -178,6 +256,9 @@ function designerFor(key: string) {
   </div>
 </template>
 
+.storage-warn {
+  margin: 8px 12px;
+}
 <style scoped>
 .lowcode-platform {
   display: flex;

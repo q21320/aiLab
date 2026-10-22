@@ -20,6 +20,7 @@ import {
   defaultScreenSchema,
 } from "./defaults";
 import { clone } from "./schemaOps";
+import { apiUrl } from "../api/base";
 
 const STORAGE_KEY = "ailab.lowcode.projects.v1";
 
@@ -43,13 +44,23 @@ function loadFromStorage(): Partial<LowcodeProjects> {
   }
 }
 
-function saveToStorage(projects: LowcodeProjects): void {
+/**
+ * 保存到 localStorage。
+ * 返回 { ok, error }：存储超限时**不再静默**——大屏/报表工程容易超 5MB，
+ * 用户看不到提示就会以为已保存，关闭页面即丢。
+ */
+function saveToStorage(projects: LowcodeProjects): { ok: boolean; error?: string } {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
-  } catch {
-    // 存储超限等场景静默失败，不影响编辑
+    return { ok: true };
+  } catch (e: any) {
+    const quota = e?.name === "QuotaExceededError" || /quota/i.test(String(e?.message || ""));
+    return { ok: false, error: quota ? "本地存储空间已满（约 5MB 上限）" : String(e?.message || "本地保存失败") };
   }
 }
+
+/** 后端同步防抖定时器 */
+let syncTimer: ReturnType<typeof setTimeout> | undefined;
 
 export const useLowcodeStore = defineStore("lowcode", {
   state: () => ({
@@ -61,6 +72,12 @@ export const useLowcodeStore = defineStore("lowcode", {
       screen: null,
     } as LowcodeProjects,
     savedAt: 0,
+    /** 后端是否可用 */
+    backendOnline: null as null | boolean,
+    /** 最近同步错误 */
+    lastSyncError: "",
+    /** 本地存储告警（空间不足等） */
+    storageWarning: "",
   }),
   getters: {
     hasData(): boolean {
@@ -113,10 +130,77 @@ export const useLowcodeStore = defineStore("lowcode", {
       this.persist();
     },
 
-    /** 持久化到 localStorage */
+    /**
+     * 持久化：localStorage + 后端 PostgreSQL 双写。
+     *
+     * 此前只写 localStorage：换设备/清缓存设计稿全丢，
+     * 而「已发布应用」在数据库中，设计与发布两份数据割裂。
+     */
     persist() {
-      saveToStorage(this.projects);
+      const r = saveToStorage(this.projects);
+      this.storageWarning = r.ok ? "" : r.error || "本地保存失败";
       this.savedAt = Date.now();
+      // 后端异步同步（防抖 500ms，设计器高频保存不至于打爆接口）
+      clearTimeout(syncTimer);
+      syncTimer = setTimeout(() => {
+        void this.pushToServer();
+      }, 500);
+    },
+
+    /** 推送全部工程到后端 */
+    async pushToServer() {
+      try {
+        const res = await fetch(apiUrl("/api/lowcode/projects"), {
+          method: "PUT",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projects: this.projects }),
+        });
+        this.backendOnline = res.ok;
+        this.lastSyncError = res.ok ? "" : `同步失败（${res.status}）`;
+      } catch {
+        this.backendOnline = false;
+        this.lastSyncError = "无法连接后端，工程暂存在本地";
+      }
+    },
+
+    /**
+     * 从后端加载工程。
+     * · 后端有数据 → 覆盖本地
+     * · 后端为空 → 上传本地（含内置示例）完成初始化
+     * · 后端不可达 → 保持本地数据
+     */
+    async loadFromServer() {
+      try {
+        const res = await fetch(apiUrl("/api/lowcode/projects"), { credentials: "include" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          this.backendOnline = false;
+          this.lastSyncError = body?.error || `加载失败（${res.status}）`;
+          return false;
+        }
+        this.backendOnline = true;
+        const p = body?.projects;
+        if (p && typeof p === "object" && Object.values(p).some((v) => v !== null)) {
+          this.projects = {
+            page: p.page ?? null,
+            form: p.form ?? null,
+            flow: p.flow ?? null,
+            report: p.report ?? null,
+            screen: p.screen ?? null,
+          };
+          this.ensureDefaults();
+          const r = saveToStorage(this.projects);
+          this.storageWarning = r.ok ? "" : r.error || "";
+        } else {
+          await this.pushToServer();
+        }
+        return true;
+      } catch {
+        this.backendOnline = false;
+        this.lastSyncError = "无法连接后端，使用本地数据";
+        return false;
+      }
     },
 
     /** 重置为默认示例 */
