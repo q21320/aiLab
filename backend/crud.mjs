@@ -119,18 +119,32 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile, database }) {
     return ensureResource(name);
   }
 
-  /** 推断字段（未配置时按首行数据生成） */
+  /** 推断字段：合并注册元数据与首行数据推断（确保不被只有 id 的初始注册卡住） */
   function inferFields(res) {
-    if (res.fields && res.fields.length) return res.fields;
+    const registered = res.fields || [];
     const first = res.rows[0];
-    if (!first) return [];
-    return Object.keys(first)
+    if (!first) return registered;
+    // 从首行推断完整字段集
+    const inferred = Object.keys(first)
       .filter((k) => !["createdAt", "updatedAt"].includes(k))
       .map((k) => {
         const v = first[k];
         const type = typeof v === "number" ? "number" : typeof v === "boolean" ? "switch" : "text";
         return { prop: k, label: k, type: FIELD_TYPES.includes(type) ? type : "text" };
       });
+    // 合并：注册信息优先（保留 label/type/required/options），缺失的从推断补
+    const regMap = new Map(registered.map((f) => [f.prop, f]));
+    const merged = inferred.map((inf) => {
+      const reg = regMap.get(inf.prop);
+      if (!reg) return inf;
+      // 合并：保留注册字段的 label/required/options/type（若注册有值的话）
+      return { ...inf, ...Object.fromEntries(Object.entries(reg).filter(([, v]) => v !== undefined && v !== "")) };
+    });
+    // 确保 registered 中有但 inferred 中没有的字段也保留（如自定义注册字段）
+    for (const reg of registered) {
+      if (!merged.some((m) => m.prop === reg.prop)) merged.push(reg);
+    }
+    return merged;
   }
 
   const ok = (res, data) => sendJSON(res, 200, { ok: true, ...data });
@@ -199,6 +213,8 @@ export function createCrudRoutes({ sendJSON, readBody, dataFile, database }) {
         }
         const fields = inferFields(r);
         for (const f of fields) {
+          // id 为系统主键：缺失时下方会自动生成，不应作为用户必填字段拦截（否则无 id 字段的表单无法提交）
+          if (f.prop === "id") continue;
           if (f.required && (data[f.prop] === undefined || data[f.prop] === "")) {
             sendJSON(res, 400, { ok: false, error: `字段「${f.label || f.prop}」为必填` });
             return true;

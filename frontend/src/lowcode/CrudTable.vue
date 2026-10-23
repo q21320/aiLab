@@ -51,6 +51,18 @@ const displayTotal = computed(() => (props.editable ? designRows.value.length : 
 /** 表单字段：优先用配置，其次用后端字段元数据 */
 const formFields = computed<CrudField[]>(() => cfg.value.formFields?.length ? cfg.value.formFields : serverFields.value);
 
+/** 列渲染时，select 类字段把 value 映射回 label */
+function displayCell(row: Record<string, any>, colProp: string): string {
+  const raw = row[colProp];
+  if (raw === null || raw === undefined || raw === "") return "";
+  const field = formFields.value.find((f) => f.prop === colProp);
+  if (field?.type === "select" && Array.isArray(field.options) && field.options.length) {
+    const hit = field.options.find((o) => String(o.value) === String(raw));
+    if (hit) return hit.label || String(hit.value);
+  }
+  return String(raw);
+}
+
 // ---------------------------------------------------------------------------
 // 数据加载
 // ---------------------------------------------------------------------------
@@ -216,7 +228,9 @@ const searchable = computed(() => cfg.value.searchable !== false);
         :width="c.width"
         min-width="120"
         show-overflow-tooltip
-      />
+      >
+        <template #default="{ row }">{{ displayCell(row, c.prop) }}</template>
+      </el-table-column>
       <el-table-column v-if="canEdit || canDelete" label="操作" width="150" fixed="right">
         <template #default="{ row }">
           <el-button v-if="canEdit" size="small" text type="primary" :icon="EditPen" @click="openEdit(row)">编辑</el-button>

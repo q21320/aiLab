@@ -21,6 +21,7 @@ import {
 } from "./defaults";
 import { clone } from "./schemaOps";
 import { apiUrl } from "../api/base";
+import { collectChatsPayload } from "./useChatSession";
 
 const STORAGE_KEY = "ailab.lowcode.projects.v1";
 
@@ -147,14 +148,14 @@ export const useLowcodeStore = defineStore("lowcode", {
       }, 500);
     },
 
-    /** 推送全部工程到后端 */
+    /** 推送全部工程 + 聊天会话到后端 */
     async pushToServer() {
       try {
         const res = await fetch(apiUrl("/api/lowcode/projects"), {
           method: "PUT",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ projects: this.projects }),
+          body: JSON.stringify({ projects: this.projects, chats: collectChatsPayload() }),
         });
         this.backendOnline = res.ok;
         this.lastSyncError = res.ok ? "" : `同步失败（${res.status}）`;

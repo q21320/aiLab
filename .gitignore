@@ -46,3 +46,7 @@ pnpm-debug.log*
 # 离线交付包（镜像 tar 约 170MB，不进仓库；由 tools 脚本生成）
 dist-release/
 *.tar.gz
+
+# 本地实验产物（模型/截图/临时 Python 虚拟环境，不入库）
+.models/
+.venv-ml/

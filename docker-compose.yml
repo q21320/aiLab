@@ -49,8 +49,12 @@ services:
       PORT: 3800
       AILAB_HOST: 0.0.0.0
       AILAB_NO_OPEN: "1"
-      # 可选：AI 页面生成密钥（留空则关闭该功能）
+      # 可选：AI 页面生成（上游为任意 OpenAI 兼容服务；留空则关闭该功能）
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      AI_MODEL: ${AI_MODEL:-qwen-max}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.4}
       # 时区：影响采集时间与审计日志时间戳
       TZ: ${TZ:-Asia/Shanghai}
     ports:

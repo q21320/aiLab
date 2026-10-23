@@ -820,7 +820,17 @@ pollerRef.current = poller;
 poller.start();
 
 // AI 页面生成代理（密钥仅在服务端，见 ai.mjs）
-const aiRoutes = createAiRoutes({ sendJSON, readBody, dataDir: paths.dataDir });
+// audit 回调仅于请求时执行，届时 auth/auditRoutes 已初始化（闭包前向引用安全，与其它模块一致）。
+const aiRoutes = createAiRoutes({
+  sendJSON,
+  readBody,
+  dataDir: paths.dataDir,
+  db,
+  audit: async (req2, entry) => {
+    const actor = await auth.getSession(req2);
+    await auditRoutes.log(entry, actor ? { name: actor.name, role: actor.role } : null);
+  },
+});
 
 // 服务端会话与鉴权（存储：PostgreSQL users / sessions 表）
 const auth = await createAuth({ db });

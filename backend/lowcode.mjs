@@ -63,6 +63,7 @@ export function createLowcodeProjectsRoutes({ sendJSON, readBody, db, audit }) {
         sendJSON(res, 200, {
           ok: true,
           projects: doc?.projects || null,
+          chats: doc?.chats || null,
           updatedAt: doc?.updatedAt || 0,
         });
       } catch (e) {
@@ -88,7 +89,7 @@ export function createLowcodeProjectsRoutes({ sendJSON, readBody, db, audit }) {
       }
       try {
         const prev = await readDoc(DOC_KEY, null);
-        await writeDoc(DOC_KEY, { projects, updatedAt: Date.now() });
+        await writeDoc(DOC_KEY, { projects, chats: body?.chats ?? prev?.chats ?? null, updatedAt: Date.now() });
         // 记录哪些设计器发生了变化（避免每次自动保存都刷屏）
         const changed = KINDS.filter((k) => JSON.stringify(prev?.projects?.[k] ?? null) !== JSON.stringify(projects[k] ?? null));
         if (changed.length) {

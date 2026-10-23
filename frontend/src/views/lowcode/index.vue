@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
@@ -26,6 +26,13 @@ const store = useLowcodeStore();
 store.init();
 // 从后端加载工程（此前只存 localStorage，换设备设计稿会丢）
 void store.loadFromServer();
+
+// 聊天会话变化时触发保存（useChatSession 的 debounce 会派发此事件）
+function onChatsDirty() {
+  store.persist();
+}
+onMounted(() => window.addEventListener("ailab:chats-dirty", onChatsDirty));
+onBeforeUnmount(() => window.removeEventListener("ailab:chats-dirty", onChatsDirty));
 
 // 当前设计器页签
 const active = ref<"page" | "form" | "flow" | "report" | "screen">("page");
@@ -210,7 +217,7 @@ function designerFor(key: string) {
     <!-- 设计器主体（KeepAlive 保持各设计器状态） -->
     <div class="platform-body">
       <KeepAlive>
-        <component :is="designerFor(active)" :key="designerKey" :schema="targetSchema" />
+        <component :is="designerFor(active)" :key="designerKey" :schema="targetSchema" :app-id="String(route.query.appId || '')" />
       </KeepAlive>
     </div>
 

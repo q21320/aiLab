@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import {
@@ -11,6 +11,7 @@ import {
   Bottom,
   Rank,
   Promotion,
+  MagicStick,
 } from "@element-plus/icons-vue";
 import { useLowcodeStore } from "./store";
 import { defaultFormSchema } from "./defaults";
@@ -26,13 +27,29 @@ import {
 } from "./formTypes";
 import { clone, uid } from "./schemaOps";
 import { formToVue } from "./formExporter";
+import { generateFormSchema, refineFormSchema, loadGrounding, optimizeInput } from "./generator";
+import { useChatSession, hydrateChats } from "./useChatSession";
 
 const store = useLowcodeStore();
 
 // 从「应用中心 · 重新设计」进入时，父级传入该应用的真实 Schema（修复：原先永远加载内置示例）
-const props = defineProps<{ schema?: FormSchema | null }>();
+const props = defineProps<{ schema?: FormSchema | null; appId?: string }>();
+/** “重新设计已发布应用”模式，不污染设计工程 */
+const isRedesignMode = computed(() => !!props.schema);
+/** 聊天会话按 appId 隔离 */
+const chatScope = computed(() => props.appId || "default:form");
 const form = ref<FormSchema>(clone(props.schema || store.projects.form || defaultFormSchema()));
 const selectedId = ref("");
+
+// 后端异步 loadFromServer 完成后，把最新工程 hydrate 到画布一次。
+// 关键：一次性 —— 应用后立即 stop，避免与自动保存写回 store 形成 store↔form 无限回环（会疯狂 PUT）。
+const stopStoreHydrate = watch(
+  () => store.projects.form,
+  (newForm) => {
+    if (newForm && !isRedesignMode.value) form.value = clone(newForm);
+    stopStoreHydrate();
+  },
+);
 const selectedField = computed<FormField | undefined>(() =>
   form.value.fields.find((f) => f.id === selectedId.value)
 );
@@ -351,6 +368,7 @@ let saveTimer: number | undefined;
 watch(
   () => form.value,
   () => {
+    if (isRedesignMode.value) return;
     clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => {
       store.saveProject("form", clone(form.value));
@@ -369,7 +387,10 @@ function onKeydown(e: KeyboardEvent) {
     removeField(selectedId.value);
   }
 }
-onMounted(() => window.addEventListener("keydown", onKeydown));
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+  hydrateChats(chatScope.value);
+});
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 
 function resetExample() {
@@ -396,6 +417,87 @@ const publishVisible = ref(false);
 function onPublished(app: PublishedApp) {
   ElMessage.success(`已发布「${app.name}」，可在「应用中心」打开运行${app.menu ? "并已挂载到左侧菜单" : ""}`);
 }
+
+// ---------------------------------------------------------------------------
+// AI 连续生成 / 追问（常驻侧栏，接地真实资源）
+// ---------------------------------------------------------------------------
+const EXAMPLE_FORM_PROMPTS = [
+  "一个用户注册表单，含用户名、邮箱、密码、手机号",
+  "一个商品新增表单，对接真实 products 资源",
+  "一张员工入职登记表，含姓名、部门、入职日期、是否正式",
+  "一个意见反馈表单，含联系方式和问题描述",
+];
+const { chatMsgs, grounding, chatVisible } = useChatSession(chatScope.value);
+const chatBusy = ref(false);
+const chatInput = ref("");
+const chatListEl = ref<HTMLElement | null>(null);
+const optimizing = ref(false);
+/** 是否处于首轮（尚未生成过）——只有首轮才展示“优化描述” */
+const isFirstRound = computed(() => !chatMsgs.value.some((m) => m.role === "ai"));
+
+function scrollChat() {
+  nextTick(() => {
+    const el = chatListEl.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+async function openChat() {
+  chatVisible.value = true;
+  if (!grounding.value.length) grounding.value = await loadGrounding();
+}
+function useSample(text: string) {
+  chatInput.value = text;
+}
+// 输入优化：把口语描述改写得更结构化（仅首轮，优化动作不写入会话记录）
+async function handleOptimize() {
+  const text = chatInput.value.trim();
+  if (!text || optimizing.value || chatBusy.value) return;
+  optimizing.value = true;
+  try {
+    if (!grounding.value.length) grounding.value = await loadGrounding();
+    const improved = await optimizeInput(text, grounding.value);
+    if (improved && improved !== text) {
+      chatInput.value = improved;
+      ElMessage.success("描述已优化，可继续编辑后点“生成表单”");
+    } else {
+      ElMessage.info("描述已足够清晰，无需优化");
+    }
+  } catch (e) {
+    ElMessage.warning((e as Error).message || "优化失败，可直接发送");
+  } finally {
+    optimizing.value = false;
+  }
+}
+async function sendChat() {
+  const text = chatInput.value.trim();
+  if (!text || chatBusy.value) return;
+  chatMsgs.value.push({ role: "user", text });
+  chatInput.value = "";
+  chatBusy.value = true;
+  scrollChat();
+  try {
+    if (!grounding.value.length) grounding.value = await loadGrounding();
+    const first = !chatMsgs.value.some((m) => m.role === "ai");
+    if (first) {
+      const res = await generateFormSchema(text, grounding.value);
+      form.value = res.schema;
+      selectedId.value = "";
+      const bound = res.schema.submitApi ? `（已对接 ${res.schema.submitApi}）` : "";
+      chatMsgs.value.push({ role: "ai", text: `已生成表单「${res.schema.name || "未命名"}」，含 ${res.schema.fields.length} 个字段${bound}。可继续追问微调。` });
+    } else {
+      const draft = clone(form.value);
+      const res = await refineFormSchema(draft, text, grounding.value);
+      form.value = res.schema;
+      selectedId.value = "";
+      chatMsgs.value.push({ role: "ai", text: res.note || "已更新表单。" });
+    }
+  } catch (e) {
+    chatMsgs.value.push({ role: "ai", text: `⚠️ ${(e as Error).message || "生成失败，请重试"}` });
+  } finally {
+    chatBusy.value = false;
+    scrollChat();
+  }
+}
 </script>
 
 <template>
@@ -407,6 +509,9 @@ function onPublished(app: PublishedApp) {
         <span>字段组件</span>
       </div>
       <p class="side-desc">拖拽或点击字段到画布，支持画布内拖拽排序。</p>
+      <el-button type="primary" :icon="MagicStick" style="width: 100%; margin-bottom: 12px" @click="openChat">
+        AI 生成 / 追问
+      </el-button>
       <div
         v-for="fp in FIELD_PALETTE"
         :key="fp.type"
@@ -604,6 +709,64 @@ function onPublished(app: PublishedApp) {
         </el-tab-pane>
       </el-tabs>
     </aside>
+
+    <!-- AI 连续生成 / 追问侧栏（非模态，画布实时预览） -->
+    <el-drawer v-model="chatVisible" title="AI 表单助手" direction="rtl" size="440px" :modal="false">
+      <div style="display: flex; flex-direction: column; height: 100%">
+        <div style="font-size: 12px; color: #909399; margin-bottom: 8px; line-height: 1.5">
+          先用大白话描述表单→“生成表单”；再逐条提修改→“追问修改”。画布会实时更新，满意后点右上角“发布”。
+        </div>
+        <div ref="chatListEl" style="flex: 1; overflow-y: auto; background: #f7f8fa; border-radius: 8px; padding: 10px; margin-bottom: 10px">
+          <div v-if="!chatMsgs.length" style="color: #b0b3b8; font-size: 13px; text-align: center; padding: 24px 8px">
+            还没有对话。试着说：“生成一个商品新增表单，对接真实 products”
+          </div>
+          <div
+            v-for="(m, i) in chatMsgs"
+            :key="i"
+            :style="{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: '8px' }"
+          >
+            <div
+              :style="{
+                maxWidth: '85%',
+                padding: '8px 10px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                lineHeight: '1.5',
+                whiteSpace: 'pre-wrap',
+                background: m.role === 'user' ? '#409eff' : '#fff',
+                color: m.role === 'user' ? '#fff' : '#303133',
+                border: m.role === 'user' ? 'none' : '1px solid #ebeef5',
+              }"
+            >
+              {{ m.role === "user" ? "🧑 " + m.text : "🤖 " + m.text }}
+            </div>
+          </div>
+          <div v-if="chatBusy" style="color: #909399; font-size: 13px; padding: 4px 2px">🤖 思考中…（本地模型生成中，请稍候）</div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px">
+          <el-tag v-for="ex in EXAMPLE_FORM_PROMPTS" :key="ex" size="small" effect="plain" style="cursor: pointer" @click="useSample(ex)">{{ ex }}</el-tag>
+        </div>
+        <el-input
+          v-model="chatInput"
+          type="textarea"
+          :rows="3"
+          resize="none"
+          :disabled="chatBusy || optimizing"
+          placeholder="描述表单或提出修改要求（回车发送）"
+          @keydown.enter.exact.prevent="sendChat"
+        />
+        <div v-if="isFirstRound" style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px">
+          <el-button size="small" type="primary" plain :icon="MagicStick" :loading="optimizing" :disabled="chatBusy || !chatInput.trim()" @click="handleOptimize">
+            {{ optimizing ? "优化中…" : "✨ 优化描述" }}
+          </el-button>
+          <span v-if="optimizing" style="font-size: 12px; color: #e6a23c">⏳ 本地模型优化中，约需 10~30 秒…</span>
+          <span v-else style="font-size: 12px; color: #909399">描述太笼统？先优化再生成</span>
+        </div>
+        <el-button type="primary" :icon="MagicStick" :loading="chatBusy" :disabled="optimizing" style="margin-top: 8px; width: 100%" @click="sendChat">
+          {{ chatBusy ? "生成中…" : isFirstRound ? "生成表单" : "追问修改" }}
+        </el-button>
+      </div>
+    </el-drawer>
 
     <!-- 预览 -->
     <el-dialog v-model="previewVisible" title="表单预览（支持校验与提交模拟）" width="780px" top="5vh">

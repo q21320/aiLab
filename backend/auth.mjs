@@ -87,6 +87,10 @@ const ROUTE_RULES = [
   { prefix: "/api/users", minRole: "admin" },
   // AI 生成（消耗额度）
   { method: "POST", prefix: "/api/ai/generate", minRole: "operator" },
+  // AI 上游模型配置（含密钥、影响全站生成行为）：读/写/测试均仅管理员
+  { method: "GET", prefix: "/api/ai/config", minRole: "admin" },
+  { method: "PUT", prefix: "/api/ai/config", minRole: "admin" },
+  { method: "POST", prefix: "/api/ai/config", minRole: "admin" },
 ];
 
 /** 只读接口：登录即可 */

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance } from "element-plus";
 import { Download, Upload, FolderOpened, Plus } from "@element-plus/icons-vue";
 import { useUserStore } from "../../stores/user";
@@ -12,6 +12,16 @@ import {
   type NotifyConfig,
   type NotifyChannel,
 } from "../../api/iot";
+import {
+  fetchAiConfig,
+  saveAiProfile,
+  setAiDefault,
+  deleteAiProfile,
+  resetAiConfig,
+  testAiConfig,
+  type AiProfile,
+  type AiActive,
+} from "../../api/ai";
 
 
 const userStore = useUserStore();
@@ -126,7 +136,143 @@ async function testChannel(ch: NotifyChannel) {
 
 onMounted(() => {
   void loadNotifyConfig();
+  void loadAiConfig();
 });
+
+// ---------------------------------------------------------------------------
+// AI 上游模型配置（多方案 profile·全局默认·仅管理员·密钥存后端不回传）
+// ---------------------------------------------------------------------------
+const aiProfiles = ref<AiProfile[]>([]);
+const aiDefaultId = ref<string | null>(null);
+const aiActive = ref<AiActive | null>(null);
+const aiAdmin = ref(false);
+const aiTestingId = ref("");
+const aiDlg = reactive({
+  visible: false,
+  isNew: true,
+  saving: false,
+  id: "",
+  name: "",
+  baseUrl: "",
+  model: "",
+  temperature: 0.4,
+  apiKey: "",
+});
+
+async function loadAiConfig() {
+  const res = await fetchAiConfig();
+  if (res?.ok && Array.isArray(res.profiles)) {
+    aiAdmin.value = true;
+    aiProfiles.value = res.profiles;
+    aiDefaultId.value = res.defaultId ?? null;
+    aiActive.value = res.active ?? null;
+  } else {
+    aiAdmin.value = false; // 403：非管理员看不到方案列表，面板降级为只读提示
+  }
+}
+
+function openNewAi() {
+  Object.assign(aiDlg, {
+    visible: true,
+    isNew: true,
+    saving: false,
+    id: "",
+    name: "",
+    baseUrl: "",
+    model: "",
+    temperature: 0.4,
+    apiKey: "",
+  });
+}
+
+function openEditAi(p: AiProfile) {
+  Object.assign(aiDlg, {
+    visible: true,
+    isNew: false,
+    saving: false,
+    id: p.id,
+    name: p.name,
+    baseUrl: p.baseUrl,
+    model: p.model,
+    temperature: p.temperature ?? 0.4,
+    apiKey: "", // 留空表示不改动已存密钥
+  });
+}
+
+async function saveAiProfileHandler() {
+  aiDlg.saving = true;
+  try {
+    const patch: Record<string, unknown> = {
+      name: aiDlg.name,
+      baseUrl: aiDlg.baseUrl,
+      model: aiDlg.model,
+      temperature: aiDlg.temperature,
+    };
+    if (!aiDlg.isNew) patch.id = aiDlg.id;
+    if (aiDlg.apiKey.trim()) patch.apiKey = aiDlg.apiKey.trim(); // 只有填了新密钥才提交
+    const res = await saveAiProfile(patch);
+    if (res?.ok) {
+      ElMessage.success("模型方案已保存");
+      aiDlg.visible = false;
+      await loadAiConfig();
+    } else {
+      ElMessage.error(res?.error || "保存失败，需管理员权限");
+    }
+  } finally {
+    aiDlg.saving = false;
+  }
+}
+
+async function setAiDefaultHandler(id: string) {
+  const res = await setAiDefault(id);
+  if (res?.ok) {
+    ElMessage.success("已设为默认，AI 生成走该方案");
+    await loadAiConfig();
+  } else {
+    ElMessage.error(res?.error || "操作失败，需管理员权限");
+  }
+}
+
+async function deleteAiHandler(p: AiProfile) {
+  try {
+    await ElMessageBox.confirm(`确定删除方案「${p.name || p.model || p.id}」？`, "删除确认", { type: "warning" });
+  } catch {
+    return;
+  }
+  const res = await deleteAiProfile(p.id);
+  if (res?.ok) {
+    ElMessage.success("已删除");
+    await loadAiConfig();
+  } else {
+    ElMessage.error(res?.error || "删除失败");
+  }
+}
+
+async function resetAiHandler() {
+  try {
+    await ElMessageBox.confirm("将清除全部模型方案，恢复为环境变量默认。继续？", "恢复默认", { type: "warning" });
+  } catch {
+    return;
+  }
+  const res = await resetAiConfig();
+  if (res?.ok) {
+    ElMessage.success("已清除全部方案，恢复为环境变量默认");
+    await loadAiConfig();
+  } else {
+    ElMessage.error(res?.error || "操作失败，需管理员权限");
+  }
+}
+
+async function testAiHandler(id?: string) {
+  aiTestingId.value = id || aiDefaultId.value || "__active__";
+  try {
+    const res = await testAiConfig(id);
+    if (res?.ok) ElMessage.success(`连接正常，模型回复：${res.sample || "ok"}`);
+    else ElMessage.error(res?.error || "连接失败");
+  } finally {
+    aiTestingId.value = "";
+  }
+}
 
 // 修改密码
 const pwdRef = ref<FormInstance>();
@@ -383,6 +529,86 @@ function pickBackupFile(e: Event) {
             企业微信/钉钉机器人：在群设置中「添加机器人」获取 Webhook 地址。告警消息包含设备、级别、内容、时间与编号。
             配置仅管理员可见，Webhook 地址与密码在接口返回时已脱敏。
           </el-alert>
+        </el-tab-pane>
+
+        <!-- AI 模型配置（多方案） -->
+        <el-tab-pane label="AI 模型配置">
+          <el-alert
+            v-if="aiActive"
+            :type="aiActive.configured ? 'success' : 'warning'"
+            :closable="false"
+            show-icon
+            class="mb16"
+            :title="
+              aiActive.configured
+                ? `当前默认：${aiActive.name ? aiActive.name + ' · ' : ''}${aiActive.model} @ ${aiActive.baseUrl}${aiActive.local ? '（本地/内网）' : ''}，来源：${aiActive.source === 'runtime' ? '管理员方案' : '环境变量默认'}`
+                : 'AI 尚未配置：公网 https 上游需填写密钥，本地/内网 http 上游可免密钥'
+            "
+          />
+          <el-alert v-else type="warning" :closable="false" show-icon class="mb16" title="仅管理员可查看与维护 AI 模型方案" />
+
+          <div v-if="aiAdmin" class="mb16">
+            <el-button type="primary" :icon="Plus" @click="openNewAi">新增模型方案</el-button>
+            <el-button text type="warning" @click="resetAiHandler">恢复环境变量默认</el-button>
+          </div>
+
+          <el-table v-if="aiAdmin" :data="aiProfiles" class="mb16" empty-text="暂无方案，点击「新增模型方案」添加">
+            <el-table-column prop="name" label="名称" min-width="120" />
+            <el-table-column prop="model" label="模型" min-width="140" />
+            <el-table-column prop="baseUrl" label="服务地址" min-width="220" show-overflow-tooltip />
+            <el-table-column label="密钥" width="110">
+              <template #default="{ row }">{{ row.hasKey ? row.keyPreview : "—" }}</template>
+            </el-table-column>
+            <el-table-column label="默认" width="80">
+              <template #default="{ row }">
+                <el-tag v-if="row.id === aiDefaultId" type="success" size="small">默认</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" min-width="270">
+              <template #default="{ row }">
+                <el-button size="small" text type="primary" :disabled="row.id === aiDefaultId" @click="setAiDefaultHandler(row.id)">设为默认</el-button>
+                <el-button size="small" text @click="openEditAi(row)">编辑</el-button>
+                <el-button size="small" text :loading="aiTestingId === row.id" @click="testAiHandler(row.id)">测试</el-button>
+                <el-button size="small" text type="danger" @click="deleteAiHandler(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-alert type="info" :closable="false" show-icon class="mt12">
+            全站 AI 生成走标为「默认」的方案。方案存于数据库（PostgreSQL），重启/重建容器都不会丢失；密钥只存服务端、绝不回传浏览器。
+          </el-alert>
+
+          <el-dialog v-model="aiDlg.visible" :title="aiDlg.isNew ? '新增模型方案' : '编辑模型方案'" width="520px">
+            <el-form label-width="120px">
+              <el-form-item label="方案名称">
+                <el-input v-model="aiDlg.name" placeholder="如：本地 Ollama / 线上 DashScope" />
+              </el-form-item>
+              <el-form-item label="服务地址 Base URL">
+                <el-input v-model="aiDlg.baseUrl" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1 或 http://host.docker.internal:11434/v1" />
+                <span class="hint">OpenAI 兼容地址；未带版本号会自动补 /v1；http 仅限本机/内网，公网请用 https</span>
+              </el-form-item>
+              <el-form-item label="模型名">
+                <el-input v-model="aiDlg.model" placeholder="如 qwen-max / qwen2.5:7b-q4km" />
+              </el-form-item>
+              <el-form-item label="采样温度">
+                <el-input-number v-model="aiDlg.temperature" :min="0" :max="2" :step="0.1" :precision="2" />
+                <span class="hint">出结构化 JSON 建议 0.2～0.5</span>
+              </el-form-item>
+              <el-form-item label="上游密钥">
+                <el-input
+                  v-model="aiDlg.apiKey"
+                  type="password"
+                  show-password
+                  :placeholder="!aiDlg.isNew && aiProfiles.find((p) => p.id === aiDlg.id)?.hasKey ? `已设置（${aiProfiles.find((p) => p.id === aiDlg.id)?.keyPreview}），留空则不修改` : '本地/内网可留空；公网 https 必填'"
+                />
+                <span class="hint">密钥只存服务端、绝不回传浏览器；生成链路始终走 /api/ai 代理</span>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="aiDlg.visible = false">取消</el-button>
+              <el-button type="primary" :loading="aiDlg.saving" @click="saveAiProfileHandler">保存</el-button>
+            </template>
+          </el-dialog>
         </el-tab-pane>
 
         <!-- 账号安全 -->

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import type { UploadFile } from "element-plus";
 import {
   MagicStick,
   Download,
@@ -10,7 +9,6 @@ import {
   RefreshRight,
   CopyDocument,
   View,
-  Plus,
   Rank,
   FolderOpened,
   Promotion,
@@ -22,7 +20,8 @@ import type { PublishedApp } from "./publish";
 import { LC_DRAG_KEY, LC_ACTIONS_KEY } from "./lcCore";
 import type { LcDragState, LcActions } from "./lcCore";
 import { groupPageComponents, createPageNode, getPageComponent } from "./registry";
-import { generateSchema, EXAMPLE_PROMPTS } from "./generator";
+import { generateSchema, refineSchema, loadGrounding, optimizeInput, EXAMPLE_PROMPTS } from "./generator";
+import { useChatSession, hydrateChats } from "./useChatSession";
 import { schemaToVue, schemaToJson } from "./exporter";
 import {
   clone,
@@ -44,9 +43,23 @@ import type { PageSchema, SchemaNode, NodeType } from "./types";
 const store = useLowcodeStore();
 
 // 从「应用中心 · 重新设计」进入时，父级传入该应用的真实 Schema（修复：原先永远加载内置示例）
-const props = defineProps<{ schema?: PageSchema | null }>();
+const props = defineProps<{ schema?: PageSchema | null; appId?: string }>();
+/** 是否处于“重新设计已发布应用”模式（此时不应污染设计工程 store） */
+const isRedesignMode = computed(() => !!props.schema);
+/** 聊天会话按 appId 隔离：有 appId 用 "page_mvjikjnc_1"，没有用 "default:page" */
+const chatScope = computed(() => props.appId || "default:page");
 const schema = ref<PageSchema>(clone(props.schema || store.projects.page || createEmptyPage()));
 const selectedId = ref("");
+
+// 后端异步 loadFromServer 完成后，把最新工程 hydrate 到画布一次。
+// 关键：一次性 —— 应用后立即 stop，避免与「800ms 自动保存写回 store」形成 store↔schema 无限回环（会疯狂 PUT）。
+const stopStoreHydrate = watch(
+  () => store.projects.page,
+  (newPage) => {
+    if (newPage && !isRedesignMode.value) schema.value = clone(newPage);
+    stopStoreHydrate();
+  },
+);
 
 const selectedNode = computed<SchemaNode | null>(() =>
   selectedId.value ? findNode(schema.value, selectedId.value) : null
@@ -192,7 +205,10 @@ function onKeydown(e: KeyboardEvent) {
     redo();
   }
 }
-onMounted(() => window.addEventListener("keydown", onKeydown));
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+  hydrateChats(chatScope.value);
+});
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 
 // ---------------------------------------------------------------------------
@@ -203,6 +219,8 @@ let saveTimer: number | undefined;
 watch(
   schema,
   () => {
+    // “重新设计已发布应用”时不写回设计工程（避免污染默认进入时的状态）
+    if (isRedesignMode.value) return;
     clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => {
       store.saveProject("page", clone(schema.value));
@@ -269,44 +287,83 @@ function downloadCode() {
   ElMessage.success("已开始下载");
 }
 
-// AI 生成
-const aiVisible = ref(false);
-const prompt = ref("");
-const generating = ref(false);
-const matched = ref("");
-const uploadFiles = ref<UploadFile[]>([]);
-async function handleGenerate() {
-  if (!prompt.value.trim() && uploadFiles.value.length === 0) {
-    ElMessage.warning("请输入描述或上传图片");
-    return;
-  }
-  // 修复：原先上传的图片被完全忽略，只传 prompt，用户只传图时生成空壳页面。
-  // 当前后端代理为纯文本模型，不支持图像输入，因此明确告知而不是静默忽略。
-  if (uploadFiles.value.length > 0 && !prompt.value.trim()) {
-    ElMessage.warning("当前 AI 生成仅支持文字描述，请补充页面描述（参考图功能暂未接入多模态模型）");
-    return;
-  }
-  if (uploadFiles.value.length > 0) {
-    ElMessage.info("参考图暂不参与生成，本次仅根据文字描述生成页面");
-  }
-  generating.value = true;
-  matched.value = "";
+// AI 连续生成 / 追问（常驻侧栏，会话按 appId 隔离并持久化到数据库）
+const { chatMsgs, grounding, chatVisible } = useChatSession(chatScope.value);
+const chatBusy = ref(false);
+const chatInput = ref("");
+const chatListEl = ref<HTMLElement | null>(null);
+const optimizing = ref(false);
+/** 是否处于首轮（尚未生成过）——只有首轮才展示“优化描述” */
+const isFirstRound = computed(() => !chatMsgs.value.some((m) => m.role === "ai"));
+
+function countNodes(n: SchemaNode): number {
+  return 1 + (n.children || []).reduce((s, c) => s + countNodes(c), 0);
+}
+function scrollChat() {
+  nextTick(() => {
+    const el = chatListEl.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+async function openChat() {
+  chatVisible.value = true;
+  if (!grounding.value.length) grounding.value = await loadGrounding();
+}
+function useSample(text: string) {
+  chatInput.value = text;
+}
+async function sendChat() {
+  const text = chatInput.value.trim();
+  if (!text || chatBusy.value) return;
+  chatMsgs.value.push({ role: "user", text });
+  chatInput.value = "";
+  chatBusy.value = true;
+  scrollChat();
   try {
-    const res = await generateSchema(prompt.value);
-    snapshot();
-    schema.value = res.schema;
-    matched.value = res.matched;
-    clearSelection();
-    aiVisible.value = false;
-    ElMessage.success(`已生成「${res.matched}」`);
+    if (!grounding.value.length) grounding.value = await loadGrounding();
+    const first = !chatMsgs.value.some((m) => m.role === "ai");
+    if (first) {
+      const res = await generateSchema(text, grounding.value);
+      snapshot();
+      schema.value = res.schema;
+      clearSelection();
+      const bound = grounding.value.length ? "（表格已接真实数据源）" : "";
+      chatMsgs.value.push({ role: "ai", text: `已生成页面骨架，含 ${countNodes(res.schema) - 1} 个组件${bound}。你可以继续用一句话追问微调。` });
+    } else {
+      const draft = clone(schema.value);
+      const res = await refineSchema(draft, text, grounding.value);
+      snapshot();
+      schema.value = res.schema;
+      clearSelection();
+      chatMsgs.value.push({ role: "ai", text: res.note || "已更新页面。" });
+    }
   } catch (e) {
-    ElMessage.error((e as Error).message || "生成失败，请稍后重试");
+    chatMsgs.value.push({ role: "ai", text: `⚠️ ${(e as Error).message || "生成失败，请重试"}` });
   } finally {
-    generating.value = false;
+    chatBusy.value = false;
+    scrollChat();
   }
 }
-function useExample(text: string) {
-  prompt.value = text;
+
+// 输入优化：把口语描述改写得更结构化（仅首轮，优化动作不写入会话记录）
+async function handleOptimize() {
+  const text = chatInput.value.trim();
+  if (!text || optimizing.value || chatBusy.value) return;
+  optimizing.value = true;
+  try {
+    if (!grounding.value.length) grounding.value = await loadGrounding();
+    const improved = await optimizeInput(text, grounding.value);
+    if (improved && improved !== text) {
+      chatInput.value = improved;
+      ElMessage.success("描述已优化，可继续编辑后点“生成页面”");
+    } else {
+      ElMessage.info("描述已足够清晰，无需优化");
+    }
+  } catch (e) {
+    ElMessage.warning((e as Error).message || "优化失败，可直接发送");
+  } finally {
+    optimizing.value = false;
+  }
 }
 
 // 空白页面 / 恢复示例
@@ -364,8 +421,8 @@ snapshot();
       </div>
       <p class="side-desc">拖拽组件到画布，或点击组件追加到页面末尾。</p>
 
-      <el-button type="primary" :icon="MagicStick" style="width: 100%; margin-bottom: 12px" @click="aiVisible = true">
-        AI 生成页面
+      <el-button type="primary" :icon="MagicStick" style="width: 100%; margin-bottom: 12px" @click="openChat">
+        AI 生成 / 追问
       </el-button>
 
       <div v-for="g in groups" :key="g.category" class="palette-group">
@@ -489,51 +546,91 @@ snapshot();
       <pre class="code-block"><code>{{ exportCode }}</code></pre>
     </el-dialog>
 
-    <!-- AI 生成对话框 -->
-    <el-dialog v-model="aiVisible" title="AI 页面生成" width="640px" top="8vh">
-      <p class="ai-desc">
-        用自然语言描述页面需求，AI 将生成可继续拖拽编辑的页面结构。
-      </p>
-      <el-input
-        v-model="prompt"
-        type="textarea"
-        :rows="4"
-        resize="none"
-        placeholder="描述你想要的页面，例如：一个用户登录页面"
-      />
-      <div class="examples">
-        <span class="examples-label">示例：</span>
-        <el-tag
-          v-for="ex in EXAMPLE_PROMPTS"
-          :key="ex"
-          class="example-tag"
-          effect="plain"
-          size="small"
-          @click="useExample(ex)"
-        >
-          {{ ex }}
-        </el-tag>
-      </div>
-      <el-upload
-        v-model:file-list="uploadFiles"
-        :auto-upload="false"
-        list-type="picture-card"
-        :limit="3"
-        accept="image/*"
-        class="ai-upload"
-      >
-        <el-icon><Plus /></el-icon>
-      </el-upload>
-      <template #footer>
-        <div class="ai-footer">
-          <span v-if="matched" class="matched">识别为：{{ matched }}</span>
-          <el-button @click="aiVisible = false">取消</el-button>
-          <el-button type="primary" :icon="MagicStick" :loading="generating" @click="handleGenerate">
-            {{ generating ? "生成中..." : "生成页面" }}
-          </el-button>
+    <!-- AI 连续生成 / 追问侧栏（非模态，画布实时预览） -->
+    <el-drawer v-model="chatVisible" title="AI 页面助手" direction="rtl" size="440px" :modal="false">
+      <div style="display: flex; flex-direction: column; height: 100%">
+        <div style="font-size: 12px; color: #909399; margin-bottom: 8px; line-height: 1.5">
+          先用大白话描述需求→“生成页面”；再逐条提修改→“追问修改”。页面会实时更新，满意后点右上角“发布”。
         </div>
-      </template>
-    </el-dialog>
+        <div ref="chatListEl" style="flex: 1; overflow-y: auto; background: #f7f8fa; border-radius: 8px; padding: 10px; margin-bottom: 10px">
+          <div v-if="!chatMsgs.length" style="color: #b0b3b8; font-size: 13px; text-align: center; padding: 24px 8px">
+            还没有对话。试着说：“生成一个订单管理页，用真实数据”
+          </div>
+          <div
+            v-for="(m, i) in chatMsgs"
+            :key="i"
+            :style="{
+              display: 'flex',
+              justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start',
+              marginBottom: '8px',
+            }"
+          >
+            <div
+              :style="{
+                maxWidth: '85%',
+                padding: '8px 10px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                lineHeight: '1.5',
+                whiteSpace: 'pre-wrap',
+                background: m.role === 'user' ? '#409eff' : '#fff',
+                color: m.role === 'user' ? '#fff' : '#303133',
+                border: m.role === 'user' ? 'none' : '1px solid #ebeef5',
+              }"
+            >
+              {{ m.role === "user" ? "🧑 " + m.text : "🤖 " + m.text }}
+            </div>
+          </div>
+          <div v-if="chatBusy" style="color: #909399; font-size: 13px; padding: 4px 2px">🤖 思考中…（本地模型生成整页较慢，请稍候）</div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px">
+          <el-tag
+            v-for="ex in EXAMPLE_PROMPTS"
+            :key="ex"
+            size="small"
+            effect="plain"
+            style="cursor: pointer"
+            @click="useSample(ex)"
+          >
+            {{ ex }}
+          </el-tag>
+        </div>
+        <el-input
+          v-model="chatInput"
+          type="textarea"
+          :rows="3"
+          resize="none"
+          :disabled="chatBusy || optimizing"
+          placeholder="描述页面或提出修改要求（回车发送）"
+          @keydown.enter.exact.prevent="sendChat"
+        />
+        <div v-if="isFirstRound" style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :icon="MagicStick"
+            :loading="optimizing"
+            :disabled="chatBusy || !chatInput.trim()"
+            @click="handleOptimize"
+          >
+            {{ optimizing ? "优化中…" : "✨ 优化描述" }}
+          </el-button>
+          <span v-if="optimizing" style="font-size: 12px; color: #e6a23c">⏳ 本地模型优化中，约需 10~30 秒…</span>
+          <span v-else style="font-size: 12px; color: #909399">描述太笼统？先优化再生成</span>
+        </div>
+        <el-button
+          type="primary"
+          :icon="MagicStick"
+          :loading="chatBusy"
+          :disabled="optimizing"
+          style="margin-top: 8px; width: 100%"
+          @click="sendChat"
+        >
+          {{ chatBusy ? "生成中…" : isFirstRound ? "生成页面" : "追问修改" }}
+        </el-button>
+      </div>
+    </el-drawer>
 
     <!-- 发布对话框 -->
     <PublishDialog
