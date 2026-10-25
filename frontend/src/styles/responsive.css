@@ -67,21 +67,16 @@
     width: 100%;
   }
 
-  /* 弹窗：接近全屏，内容区自己滚，避免底部按钮被键盘顶出屏幕 */
+  /* 弹窗：接近全屏，内容区自己滚（表单上下堆叠、键高跟踪等形态级规则统一写在下面的
+     「全屏弹窗形态」块里，不放在宽度断点——安卓 webview 视口宽经常 ≥768，断点不命中） */
   .el-dialog:not(.is-fullscreen) {
     width: 94vw !important;
     margin-top: 5vh !important;
-    max-height: 90vh;
+    max-height: min(90vh, var(--app-vh, 90vh));
   }
   .el-dialog {
     display: flex;
     flex-direction: column;
-  }
-  /* 组件自己标了 is-fullscreen 的就真占满，别被上面的 90vh 缩一截 */
-  .el-dialog.is-fullscreen {
-    height: 100%;
-    max-height: none;
-    margin: 0;
   }
   .el-dialog__body {
     flex: 1;
@@ -94,17 +89,22 @@
     margin-right: 0;
   }
   .el-dialog__footer {
-    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    padding: 10px 16px;
+    /* 底部留足空间：微信工具条/键盘会盖在 webview 上，留白不够「确定」就点不到 */
+    padding-bottom: calc(34px + env(safe-area-inset-bottom));
+    background: #fff;
   }
 
   /* 表单：EP2 的 el-form-item 本身是 flex 行容器，只改 label 没用（label 仍被当 flex item 排在左边），
-     整项改块布局才是真的上下结构 */
+     整项改块布局才是真的上下结构。
+     !important 是必要的：EP 按需引入的组件样式是运行时插进 <head> 的，排在静态打包的
+     responsive.css 之后，同特异性下它会赢（安卓上标签仍在左边就是这么漏的） */
   .el-form-item {
-    display: block;
+    display: block !important;
   }
   .el-form-item__label {
-    float: none;
-    display: block;
+    float: none !important;
+    display: block !important;
     width: auto !important;
     text-align: left !important; /* 赢过 EP 的 .el-form-item--label-right 高特异性规则 */
     padding: 0 0 2px;
@@ -149,12 +149,152 @@
     font-size: 14px;
   }
 
-  /* iOS 上字号 <16px 的输入框获焦会自动放大页面，体验很怪 */
+  /* iOS 上字号 <16px 的输入框获焦会自动放大整页且不会缩回。
+     必须直接命中 EP 的 .el-input__inner 等类选择器并用 !important：
+     裸 input 元素选择器优先级不够，会被 EP 的 14px 类规则压住（上一版就是这么漏的） */
   input,
   textarea,
-  select {
-    font-size: 16px;
+  select,
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-select__input,
+  .el-select__wrapper .el-select__selected-item {
+    font-size: 16px !important;
   }
+
+  /* 双击连点按钮/卡片不触发 iOS 的双击缩放 */
+  button,
+  a,
+  .el-button,
+  .rec-card {
+    touch-action: manipulation;
+  }
+}
+
+/* ---------- 触屏设备兼容（不看宽度，看交互方式） ----------
+   iOS 聚焦放大只认「被聚焦控件的字号 <16px」，与屏幕宽窄无关：
+   iPhone 横屏（逻辑宽 844/932）和 iPad 都不命中 767 断点，若只把 16px 写在窄屏里，
+   这些设备上输入框仍是 EP 默认的 14px，一点照样放大。
+   (hover:none)+(pointer:coarse) 精确命中手机/平板，台式机鼠标触屏笔记本不受影响。 */
+@media (hover: none) and (pointer: coarse) {
+  input,
+  textarea,
+  select,
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-select__input,
+  .el-select__wrapper .el-select__selected-item {
+    font-size: 16px !important;
+  }
+  button,
+  a,
+  .el-button,
+  .rec-card {
+    touch-action: manipulation;
+  }
+}
+
+/* ---------- 全屏弹窗形态（不看宽度，看弹窗自身） ----------
+   台账编辑弹窗在手机上标了 is-fullscreen，它的堆叠表单/键高跟踪样式必须跟着
+   「形态」走：安卓 webview（尤其微信）视口宽经常报告 ≥768px，写在 767 断点里
+   整个不命中，就会出现标签挤左边、底部按钮被键盘盖住的桌面样式。 */
+.el-dialog.is-fullscreen {
+  margin: 0;
+  /* 键盘弹起时 visualViewport 收缩，弹窗跟着缩到键盘上方（iosFocusZoom 维护 --app-vh） */
+  height: var(--app-vh, 100%);
+  max-height: none;
+}
+.el-dialog.is-fullscreen .el-form-item {
+  display: block !important;
+}
+.el-dialog.is-fullscreen .el-form-item__label {
+  float: none !important;
+  display: block !important;
+  width: auto !important;
+  text-align: left !important;
+  padding: 0 0 2px;
+  line-height: 22px;
+}
+.el-dialog.is-fullscreen .el-form-item__content {
+  margin-left: 0 !important;
+}
+
+/* ---------- 手机端卡片列表（各列表页表格的窄屏替身） ----------
+   这些类靠组件里的 isMobile 开关切换 DOM，不是靠媒体查询，所以样式写在断点外。
+   台账页用着自己组件内的 .rec-card（已验证过），其余列表页统一用这套 .m-*。 */
+.m-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 120px;
+}
+.m-card {
+  background: #fff;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 3px rgba(0, 21, 41, 0.05);
+}
+.m-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+.m-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
+}
+.m-card-sub {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
+}
+.m-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+}
+.m-card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.m-k {
+  flex: 0 0 72px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.m-v {
+  flex: 1;
+  min-width: 0;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
+}
+.m-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+/* 操作多的行（如导航菜单七个按钮）改成换行左排，EP 相邻按钮的 margin-left 归零交给 gap */
+.m-card-actions.wrap {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  row-gap: 2px;
+}
+.m-card-actions.wrap .el-button + .el-button {
+  margin-left: 0;
 }
 
 /* ---------- 抽屉导航（全局而非组件 :deep：el-drawer 被 teleport 到 body，

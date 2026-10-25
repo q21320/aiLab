@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance } from "element-plus";
 import { Download, Upload, FolderOpened, Plus } from "@element-plus/icons-vue";
 import { useUserStore } from "../../stores/user";
+import { useViewport } from "../../utils/viewport";
 import { useAuditStore } from "../../stores/audit";
 import {
   fetchNotifyConfig,
@@ -26,6 +27,7 @@ import {
 
 const userStore = useUserStore();
 const auditStore = useAuditStore();
+const { isMobile } = useViewport();
 const pwdSaving = ref(false);
 
 // 基本设置
@@ -553,7 +555,7 @@ function pickBackupFile(e: Event) {
             <el-button text type="warning" @click="resetAiHandler">恢复环境变量默认</el-button>
           </div>
 
-          <el-table v-if="aiAdmin" :data="aiProfiles" class="mb16" empty-text="暂无方案，点击「新增模型方案」添加">
+          <el-table v-if="aiAdmin && !isMobile" :data="aiProfiles" class="mb16" empty-text="暂无方案，点击「新增模型方案」添加">
             <el-table-column prop="name" label="名称" min-width="120" />
             <el-table-column prop="model" label="模型" min-width="140" />
             <el-table-column prop="baseUrl" label="服务地址" min-width="220" show-overflow-tooltip />
@@ -574,6 +576,28 @@ function pickBackupFile(e: Event) {
               </template>
             </el-table-column>
           </el-table>
+
+          <!-- 手机端：模型方案卡片（服务地址/密钥预览在表格里都是长文本列） -->
+          <div v-else-if="aiAdmin" class="m-cards mb16">
+            <div v-for="row in aiProfiles" :key="row.id" class="m-card">
+              <div class="m-card-head">
+                <span class="m-card-title">{{ row.name }}</span>
+                <el-tag v-if="row.id === aiDefaultId" type="success" size="small">默认</el-tag>
+              </div>
+              <div class="m-card-body">
+                <div class="m-card-row"><span class="m-k">模型</span><span class="m-v">{{ row.model }}</span></div>
+                <div class="m-card-row"><span class="m-k">服务地址</span><span class="m-v">{{ row.baseUrl }}</span></div>
+                <div class="m-card-row"><span class="m-k">密钥</span><span class="m-v">{{ row.hasKey ? row.keyPreview : "—" }}</span></div>
+              </div>
+              <div class="m-card-actions wrap">
+                <el-button size="small" text type="primary" :disabled="row.id === aiDefaultId" @click="setAiDefaultHandler(row.id)">设为默认</el-button>
+                <el-button size="small" text @click="openEditAi(row)">编辑</el-button>
+                <el-button size="small" text :loading="aiTestingId === row.id" @click="testAiHandler(row.id)">测试</el-button>
+                <el-button size="small" text type="danger" @click="deleteAiHandler(row)">删除</el-button>
+              </div>
+            </div>
+            <el-empty v-if="!aiProfiles.length" description="暂无方案，点击「新增模型方案」添加" :image-size="60" />
+          </div>
 
           <el-alert type="info" :closable="false" show-icon class="mt12">
             全站 AI 生成走标为「默认」的方案。方案存于数据库（PostgreSQL），重启/重建容器都不会丢失；密钥只存服务端、绝不回传浏览器。

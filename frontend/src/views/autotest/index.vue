@@ -20,6 +20,7 @@ import { iotLive, startIotLive } from "../../lowcode/iotLive";
 import { useSampleStore } from "../../stores/samples";
 import { useUserStore } from "../../stores/user";
 import { echarts, chartOption } from "../../lowcode/charts";
+import { useViewport } from "../../utils/viewport";
 
 startIotLive();
 const sampleStore = useSampleStore();
@@ -27,6 +28,7 @@ const sampleStore = useSampleStore();
 /** 只有未出库/未报废的样品才能接收测试结论（状态机守卫的前端侧同步） */
 const testableSamples = computed(() => sampleStore.samples.filter((s) => s.status !== "out" && s.status !== "scrapped"));
 const userStore = useUserStore();
+const { isMobile } = useViewport();
 
 const plans = ref<AutoTestPlan[]>([]);
 const runs = ref<AutoTestRun[]>([]);
@@ -471,7 +473,7 @@ function openReport(id: string) {
         </div>
         <template v-if="currentRun.judgments.length">
           <div class="side-title" style="margin-top: 10px">判定结果</div>
-          <el-table :data="currentRun.judgments" size="small" border>
+          <el-table v-if="!isMobile" :data="currentRun.judgments" size="small" border>
             <el-table-column prop="loop" label="轮次" width="70" />
             <el-table-column prop="label" label="测试项" min-width="180" />
             <el-table-column prop="expect" label="判定要求" min-width="170" />
@@ -483,6 +485,22 @@ function openReport(id: string) {
               </template>
             </el-table-column>
           </el-table>
+
+          <!-- 手机端：判定结果卡片，不合格项靠颜色一眼扫到 -->
+          <div v-else class="m-cards">
+            <div v-for="(j, i) in currentRun.judgments" :key="i" class="m-card" :class="{ 'is-fail': !j.pass }">
+              <div class="m-card-head">
+                <span class="m-card-title">{{ j.label }}</span>
+                <el-tag size="small" :type="j.pass ? 'success' : 'danger'">{{ j.pass ? "合格" : "不合格" }}</el-tag>
+              </div>
+              <div class="m-card-body">
+                <div class="m-card-row"><span class="m-k">轮次</span><span class="m-v">{{ j.loop }}</span></div>
+                <div class="m-card-row"><span class="m-k">判定要求</span><span class="m-v">{{ j.expect }}</span></div>
+                <div class="m-card-row"><span class="m-k">实测</span><span class="m-v">{{ j.actual }}</span></div>
+                <div class="m-card-row"><span class="m-k">采样点</span><span class="m-v">{{ j.samples }}</span></div>
+              </div>
+            </div>
+          </div>
         </template>
       </div>
       <el-empty v-else description="选择方案与设备后点击「开始自动测试」，平台将驱动真实设备执行并回传数据" :image-size="80" />
@@ -496,7 +514,7 @@ function openReport(id: string) {
           <el-button size="small" type="primary" :icon="Plus" @click="openNewPlan">新建方案</el-button>
         </div>
       </template>
-      <el-table :data="plans" border>
+      <el-table v-if="!isMobile" :data="plans" border>
         <el-table-column prop="name" label="方案名称" min-width="180" />
         <el-table-column label="步骤" min-width="380">
           <template #default="{ row }">
@@ -512,12 +530,31 @@ function openReport(id: string) {
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 手机端：步骤链在表格里占 380px，卡片里单独成段换行显示 -->
+      <div v-else class="m-cards">
+        <div v-for="row in plans" :key="row.id" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">{{ row.name }}</span>
+            <span class="m-card-sub">循环 {{ row.loops }} 次</span>
+          </div>
+          <div class="m-card-body">
+            <div class="m-card-row steps-line"><span class="m-k">步骤</span><span class="m-v steps-text">{{ row.steps.map(stepSummary).join(" → ") }}</span></div>
+          </div>
+          <div class="m-card-actions">
+            <el-button size="small" :icon="EditPen" @click="editPlan(row)">编辑</el-button>
+            <el-button size="small" type="primary" @click="selectedPlanId = row.id; startTest()">执行</el-button>
+            <el-button size="small" text type="danger" :icon="Delete" @click="removePlan(row)">删除</el-button>
+          </div>
+        </div>
+        <el-empty v-if="!plans.length" description="暂无方案" :image-size="60" />
+      </div>
     </el-card>
 
     <!-- 历史记录 -->
     <el-card shadow="never">
       <template #header><span class="panel-title">测试记录（最近 50 次）</span></template>
-      <el-table :data="runs" border>
+      <el-table v-if="!isMobile" :data="runs" border>
         <el-table-column prop="id" label="运行编号" width="150" />
         <el-table-column prop="planName" label="方案" min-width="160" />
         <el-table-column prop="deviceName" label="设备" min-width="150" />
@@ -536,6 +573,26 @@ function openReport(id: string) {
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 手机端：一条记录一卡，编号当标题、方案/设备列到正文 -->
+      <div v-else class="m-cards">
+        <div v-for="row in runs" :key="row.id" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">{{ row.id }}</span>
+            <el-tag size="small" :type="conclusionTag(row).type">{{ conclusionTag(row).text }}</el-tag>
+          </div>
+          <div class="m-card-body">
+            <div class="m-card-row"><span class="m-k">方案</span><span class="m-v">{{ row.planName }}</span></div>
+            <div class="m-card-row"><span class="m-k">设备</span><span class="m-v">{{ row.deviceName }}</span></div>
+            <div class="m-card-row"><span class="m-k">开始时间</span><span class="m-v">{{ fmtTime(row.startedAt) }}</span></div>
+          </div>
+          <div class="m-card-actions">
+            <el-button size="small" @click="viewRun(row)">查看</el-button>
+            <el-button size="small" :icon="Download" @click="openReport(row.id)">报告</el-button>
+          </div>
+        </div>
+        <el-empty v-if="!runs.length" description="暂无测试记录" :image-size="60" />
+      </div>
     </el-card>
 
     <!-- 方案编辑 -->
@@ -561,7 +618,7 @@ function openReport(id: string) {
         </div>
       </div>
 
-      <el-table :data="planForm.steps" size="small" border>
+      <el-table v-if="!isMobile" :data="planForm.steps" size="small" border>
         <el-table-column label="步骤" width="120">
           <template #default="{ row }">
             <el-select v-model="row.type" size="small">
@@ -627,6 +684,66 @@ function openReport(id: string) {
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 手机端：一步一卡。参数控件与表格版同一套（按 type 分支），只是从「一行八列」改成「卡内换行排」 -->
+      <div v-else class="step-cards">
+        <div v-for="(row, $index) in planForm.steps" :key="$index" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">步骤 {{ $index + 1 }}</span>
+            <el-select v-model="row.type" size="small" style="width: 110px">
+              <el-option label="下发设定" value="write" />
+              <el-option label="等待" value="wait" />
+              <el-option label="采集" value="collect" />
+              <el-option label="判定" value="judge" />
+            </el-select>
+            <el-button size="small" text :icon="Top" @click="moveStep($index, -1)" />
+            <el-button size="small" text :icon="Bottom" @click="moveStep($index, 1)" />
+            <el-button size="small" text type="danger" :icon="Delete" @click="removeStep($index)" />
+          </div>
+          <div class="step-fields">
+            <div class="form-field"><label>说明</label><el-input v-model="row.label" size="small" /></div>
+            <div class="form-field" v-if="row.type !== 'wait'"><label>点位 key</label><el-input v-model="row.key" size="small" /></div>
+          </div>
+          <div class="step-params">
+            <template v-if="row.type === 'write'">
+              <span class="param-label">目标值</span><el-input v-model.number="row.value" size="small" style="width: 90px" />
+            </template>
+            <template v-else-if="row.type === 'wait'">
+              <span class="param-label">秒数</span><el-input v-model.number="row.seconds" size="small" style="width: 80px" />
+            </template>
+            <template v-else-if="row.type === 'collect'">
+              <span class="param-label">次数</span><el-input v-model.number="row.count" size="small" style="width: 70px" />
+              <span class="param-label">间隔s</span><el-input v-model.number="row.interval" size="small" style="width: 70px" />
+            </template>
+            <template v-else>
+              <el-select v-model="row.mode" size="small" style="width: 130px">
+                <el-option label="偏差不超过" value="absDevLte" />
+                <el-option label="不小于" value="gte" />
+                <el-option label="不大于" value="lte" />
+                <el-option label="区间内" value="between" />
+              </el-select>
+              <template v-if="row.mode === 'absDevLte'">
+                <span class="param-label">基准</span><el-input v-model.number="row.ref" size="small" style="width: 70px" />
+                <span class="param-label">±</span><el-input v-model.number="row.value" size="small" style="width: 70px" />
+              </template>
+              <template v-else-if="row.mode === 'between'">
+                <span class="param-label">最小</span><el-input v-model.number="row.min" size="small" style="width: 70px" />
+                <span class="param-label">最大</span><el-input v-model.number="row.max" size="small" style="width: 70px" />
+              </template>
+              <template v-else>
+                <span class="param-label">阈值</span><el-input v-model.number="row.value" size="small" style="width: 80px" />
+              </template>
+              <el-select v-model="row.agg" size="small" style="width: 100px" placeholder="均值">
+                <el-option label="均值" value="avg" />
+                <el-option label="最大值" value="max" />
+                <el-option label="最小值" value="min" />
+                <el-option label="末值" value="last" />
+              </el-select>
+            </template>
+          </div>
+        </div>
+        <el-empty v-if="!planForm.steps.length" description="暂无步骤" :image-size="50" />
+      </div>
 
       <template #footer>
         <el-button @click="planVisible = false">取消</el-button>
@@ -746,5 +863,36 @@ function openReport(id: string) {
   color: #909399;
   font-size: 12px;
   margin: 0 4px 0 8px;
+}
+
+/* ---------- 手机端卡片（全局 .m-* 之外的页面私有部分） ---------- */
+.step-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 55vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.step-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 12px;
+  padding-top: 8px;
+}
+.step-params {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 0;
+  padding-top: 6px;
+  border-top: 1px dashed #f0f2f5;
+}
+.steps-line {
+  align-items: flex-start;
+}
+.m-card.is-fail {
+  border-color: var(--el-color-danger-light-5);
+  background: var(--el-color-danger-light-9);
 }
 </style>

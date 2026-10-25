@@ -6,8 +6,10 @@ import { useAuditStore, type AuditEntry } from "../../stores/audit";
 import { fetchAuditStats, logsExportUrl, type AuditQuery } from "../../api/audit";
 import { fetchRoles } from "../../api/roles";
 import { ROLE_LABELS } from "../../stores/user";
+import { useViewport } from "../../utils/viewport";
 
 const store = useAuditStore();
+const { isMobile } = useViewport();
 
 const filters = ref<{ module: string; role: string; keyword: string; range: [string, string] | null }>({
   module: "",
@@ -186,7 +188,7 @@ const storageText = computed(() => {
       <el-button type="danger" plain :icon="Delete" @click="clearAll">清空</el-button>
     </div>
 
-    <el-table :data="rows" v-loading="loading" border style="width: 100%">
+    <el-table v-if="!isMobile" :data="rows" v-loading="loading" border style="width: 100%">
       <el-table-column label="时间" width="180">
         <template #default="{ row }">{{ fmtTime(row.time) }}</template>
       </el-table-column>
@@ -203,6 +205,29 @@ const storageText = computed(() => {
         <el-empty :description="offline ? '本地缓冲暂无日志（后端未连接）' : '暂无日志'" :image-size="80" />
       </template>
     </el-table>
+
+    <!-- 手机端：一条日志一卡（详情列在表格里最宽，改成整段换行显示） -->
+    <div v-else v-loading="loading" class="m-cards">
+      <div v-for="(row, i) in rows" :key="`${row.time}-${i}`" class="m-card">
+        <div class="m-card-head">
+          <span class="m-card-title">{{ row.action }}</span>
+          <span class="m-card-sub">{{ row.module }}</span>
+        </div>
+        <div class="m-card-body">
+          <div class="m-card-row"><span class="m-k">时间</span><span class="m-v">{{ fmtTime(row.time) }}</span></div>
+          <div class="m-card-row">
+            <span class="m-k">用户</span>
+            <span class="m-v">{{ row.user }}<el-tag size="small" :type="roleType(row.role)" class="mod-tag">{{ roleName(row.role) }}</el-tag></span>
+          </div>
+          <div class="m-card-row" v-if="row.detail"><span class="m-k">详情</span><span class="m-v">{{ row.detail }}</span></div>
+        </div>
+      </div>
+      <el-empty
+        v-if="!loading && !rows.length"
+        :description="offline ? '本地缓冲暂无日志（后端未连接）' : '暂无日志'"
+        :image-size="60"
+      />
+    </div>
 
     <div class="pager">
       <el-pagination

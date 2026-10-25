@@ -5,6 +5,9 @@ import { Refresh, Search, Check } from "@element-plus/icons-vue";
 import { useRouter } from "vue-router";
 import { queryAlerts, ackAlert, ackAlertsBatch, fetchAlertStats } from "../../api/iot";
 import type { IotAlert, AlertStats } from "../../api/iot";
+import { useViewport } from "../../utils/viewport";
+
+const { isMobile } = useViewport();
 
 const loading = ref(false);
 const alerts = ref<IotAlert[]>([]);
@@ -174,7 +177,7 @@ function fmtTime(t: number): string {
         <el-button type="primary" :icon="Check" :loading="batchAcking" @click="ackAll">全部确认</el-button>
       </div>
 
-      <el-table v-loading="loading" :data="alerts" size="small" class="mt12" max-height="560">
+      <el-table v-if="!isMobile" v-loading="loading" :data="alerts" size="small" class="mt12" max-height="560">
         <el-table-column label="级别" width="80">
           <template #default="{ row }">
             <el-tag size="small" :type="row.level === 'error' ? 'danger' : 'warning'">
@@ -211,6 +214,30 @@ function fmtTime(t: number): string {
           <el-empty :description="statusFilter === 'open' ? '没有未处理的告警' : '暂无数据'" />
         </template>
       </el-table>
+
+      <!-- 手机端：告警内容在表格里是最长的一列，提到卡片标题位单独成行，不被截断 -->
+      <div v-else v-loading="loading" class="m-cards mt12">
+        <div v-for="row in alerts" :key="row.id" class="m-card">
+          <div class="m-card-head">
+            <el-tag size="small" :type="row.level === 'error' ? 'danger' : 'warning'">
+              {{ row.level === "error" ? "严重" : "预警" }}
+            </el-tag>
+            <span class="m-card-title">{{ row.message }}</span>
+            <el-tag size="small" :type="row.status === 'open' ? 'danger' : 'success'" effect="plain">
+              {{ row.status === "open" ? "未处理" : "已确认" }}
+            </el-tag>
+          </div>
+          <div class="m-card-body">
+            <div class="m-card-row"><span class="m-k">设备</span><span class="m-v">{{ row.deviceName || row.deviceId }}</span></div>
+            <div class="m-card-row"><span class="m-k">时间</span><span class="m-v">{{ fmtTime(row.time) }}</span></div>
+          </div>
+          <div class="m-card-actions">
+            <el-button link type="primary" size="small" @click="viewCurve(row)">曲线</el-button>
+            <el-button v-if="row.status === 'open'" link type="warning" size="small" :loading="acking === row.id" @click="ackOne(row)">确认</el-button>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !alerts.length" :description="statusFilter === 'open' ? '没有未处理的告警' : '暂无数据'" :image-size="60" />
+      </div>
 
       <div class="pager">
         <el-pagination

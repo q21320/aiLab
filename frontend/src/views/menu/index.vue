@@ -22,10 +22,12 @@ import {
 } from "@element-plus/icons-vue";
 import { useMenuStore, MENU_ICONS, flattenMenus, type MenuItem } from "../../stores/menu";
 import { pageKeyOf } from "../../stores/acl";
+import { useViewport } from "../../utils/viewport";
 import { fetchRoles, type RoleInfo } from "../../api/roles";
 
 const store = useMenuStore();
 const router = useRouter();
+const { isMobile } = useViewport();
 
 // ---------------------------------------------------------------------------
 // 角色派生展示（只读）：菜单路径 → 哪些角色能看到它
@@ -154,6 +156,19 @@ function resetMenus() {
 // ---------------------------------------------------------------------------
 const previewRows = computed(() => store.items);
 
+/** 手机端卡片列表：树拍平成带层级的行，靠缩进体现父子关系（卡片没法用表格的树形展开） */
+const cardRows = computed(() => {
+  const out: (MenuItem & { depth: number })[] = [];
+  const walk = (items: MenuItem[], depth: number) => {
+    for (const it of items) {
+      out.push({ ...it, depth });
+      if (it.children?.length) walk(it.children, depth + 1);
+    }
+  };
+  walk(store.items, 0);
+  return out;
+});
+
 function pathHint(item: MenuItem): string {
   return item.path || "分组节点（不跳转）";
 }
@@ -178,7 +193,7 @@ function pathHint(item: MenuItem): string {
       <span class="hint">共 {{ store.total }} 个菜单项（含子菜单）</span>
     </div>
 
-    <el-table :data="previewRows" row-key="id" :tree-props="{ children: 'children' }" default-expand-all border>
+    <el-table v-if="!isMobile" :data="previewRows" row-key="id" :tree-props="{ children: 'children' }" default-expand-all border>
       <el-table-column label="菜单名称" min-width="220">
         <template #default="{ row }">
           <el-icon class="row-icon"><component :is="row.icon || 'Document'" /></el-icon>
@@ -213,6 +228,36 @@ function pathHint(item: MenuItem): string {
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- 手机端：一行一卡，七个操作按钮换行排布（表格里它们有 330px 固定列宽） -->
+    <div v-else class="m-cards mt16">
+      <div
+        v-for="row in cardRows"
+        :key="row.id"
+        class="m-card"
+        :style="{ marginLeft: `${Math.min(row.depth, 3) * 14}px` }"
+      >
+        <div class="m-card-head">
+          <el-icon class="row-icon"><component :is="row.icon || 'Document'" /></el-icon>
+          <span class="m-card-title">{{ row.title }}</span>
+          <el-tag v-if="!row.enable" size="small" type="info" effect="plain">已停用</el-tag>
+          <el-switch :model-value="row.enable" size="small" @change="store.updateItem(row.id, { enable: !row.enable })" />
+        </div>
+        <div class="m-card-body">
+          <div class="m-card-row"><span class="m-k">路径</span><span class="m-v" :class="{ muted: !row.path }">{{ pathHint(row) }}</span></div>
+          <div class="m-card-row"><span class="m-k">可见角色</span><span class="m-v" :class="{ muted: roleText(row) === '无人可见' }">{{ roleText(row) }}</span></div>
+        </div>
+        <div class="m-card-actions wrap">
+          <el-button size="small" text type="primary" :icon="Plus" @click="openCreate(row.id)">加子菜单</el-button>
+          <el-button size="small" text :icon="EditPen" @click="openEdit(row)">编辑</el-button>
+          <el-button size="small" text :icon="Top" @click="store.moveItem(row.id, -1)">上移</el-button>
+          <el-button size="small" text :icon="Bottom" @click="store.moveItem(row.id, 1)">下移</el-button>
+          <el-button size="small" text :icon="Rank" @click="store.indentItem(row.id)">降级</el-button>
+          <el-button size="small" text type="warning" @click="store.outdentItem(row.id)">升级</el-button>
+          <el-button size="small" text type="danger" :icon="Delete" @click="removeItem(row)">删除</el-button>
+        </div>
+      </div>
+    </div>
 
     <!-- 编辑弹窗 -->
     <el-dialog v-model="dialog" title="菜单配置" width="560px">

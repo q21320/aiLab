@@ -19,6 +19,7 @@ import {
   type IotPointDef,
 } from "../../api/iot";
 import { iotLive, startIotLive } from "../../lowcode/iotLive";
+import { useViewport } from "../../utils/viewport";
 import { exportPointsCsv, fetchIotSettings, updateIotSettings } from "../../api/iot";
 import { Download } from "@element-plus/icons-vue";
 import { echarts, chartOption } from "../../lowcode/charts";
@@ -35,9 +36,14 @@ const drivers = ref<DriverDef[]>([]);
 const simulator = ref<any>(null);
 const devices = computed<IotDevice[]>(() => iotLive.devices as IotDevice[]);
 
+/** 轮询器在运行时往设备对象上挂了采集结果，但没进 IotDevice 声明（表格靠 slot 的 any 躲过了） */
+type DeviceRow = IotDevice & { lastPollAt?: number; lastError?: string };
+const deviceCards = computed<DeviceRow[]>(() => devices.value as DeviceRow[]);
+
 // 从告警页跳转：/iot?device=DEV-001&time=<毫秒时间戳> 自动打开该设备曲线并定位到告警时刻
 const route = useRoute();
 const router = useRouter();
+const { isMobile } = useViewport();
 const jumpHandled = ref(false);
 async function applyJumpQuery() {
   if (jumpHandled.value) return;
@@ -584,7 +590,7 @@ function statusTag(s: string) {
           </div>
         </div>
       </template>
-      <el-table :data="devices" border style="width: 100%">
+      <el-table v-if="!isMobile" :data="devices" border style="width: 100%">
         <el-table-column prop="name" label="设备名称" min-width="170" />
         <el-table-column label="协议" width="150">
           <template #default="{ row }">{{ protocolLabel(row.protocol) }}</template>
@@ -633,6 +639,43 @@ function statusTag(s: string) {
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 手机端：设备卡片（操作列在表格里占了 330px，手机上排不下） -->
+      <div v-else class="m-cards">
+        <div v-for="row in deviceCards" :key="row.id" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">{{ row.name }}</span>
+            <el-tag size="small" :type="statusTag(row.status)">
+              {{ row.status === "online" ? "在线" : row.status === "error" ? "异常" : "离线" }}
+            </el-tag>
+          </div>
+          <div class="m-card-body">
+            <div class="m-card-row"><span class="m-k">协议</span><span class="m-v">{{ protocolLabel(row.protocol) }}</span></div>
+            <div class="m-card-row"><span class="m-k">连接地址</span><span class="m-v">{{ addressText(row) }}</span></div>
+            <div class="m-card-row" v-if="row.location"><span class="m-k">位置</span><span class="m-v">{{ row.location }}</span></div>
+            <div class="m-card-row">
+              <span class="m-k">最近探测</span>
+              <span class="m-v">
+                <span v-if="row.lastProbe">{{ Object.entries(row.lastProbe.info || {}).slice(0, 2).map(([k, v]) => `${k}:${v}`).join(" · ") }}</span>
+                <span v-else class="muted">未探测</span>
+              </span>
+            </div>
+            <div class="m-card-row" v-if="row.lastPollAt">
+              <span class="m-k">采集</span>
+              <span class="m-v">{{ row.protocol === "mock" || !row.protocol ? "模拟" : fmtClock(row.lastPollAt) }}</span>
+            </div>
+            <div class="m-card-row" v-if="row.lastError"><span class="m-k">异常</span><span class="m-v">{{ row.lastError }}</span></div>
+          </div>
+          <div class="m-card-actions wrap">
+            <el-button size="small" :icon="Connection" @click="doProbe(row)">探测</el-button>
+            <el-button size="small" :icon="Search" @click="doRead(row)">读取</el-button>
+            <el-button size="small" :icon="Setting" :disabled="!canWrite(row)" @click="openWrite(row)">下发</el-button>
+            <el-button size="small" type="primary" :icon="Connection" @click="openChart(row)">曲线</el-button>
+            <el-button size="small" text type="danger" :icon="Delete" @click="removeDeviceRow(row)">删除</el-button>
+          </div>
+        </div>
+        <el-empty v-if="!devices.length" description="暂无设备" :image-size="60" />
+      </div>
     </el-card>
 
     <!-- 接入真实设备 -->
@@ -676,7 +719,7 @@ function statusTag(s: string) {
           <el-button size="small" :icon="Plus" @click="addPointRow">添加点位</el-button>
         </div>
       </div>
-      <el-table :data="deviceForm.points" size="small" border max-height="260">
+      <el-table v-if="!isMobile" :data="deviceForm.points" size="small" border max-height="260">
         <el-table-column label="点位 key" width="130">
           <template #default="{ row }"><el-input v-model="row.key" size="small" placeholder="temperature" /></template>
         </el-table-column>
@@ -711,6 +754,32 @@ function statusTag(s: string) {
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 手机端：点位是「八个字段一行的可编辑表」，窄屏改成一点位一卡，两格一行 -->
+      <div v-else class="pt-cards">
+        <div v-for="(row, i) in deviceForm.points" :key="i" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">点位 {{ i + 1 }}</span>
+            <el-button size="small" text type="danger" @click="removePointRow(i)">删除</el-button>
+          </div>
+          <div class="pt-grid">
+            <div class="form-field"><label>点位 key</label><el-input v-model="row.key" size="small" placeholder="temperature" /></div>
+            <div class="form-field"><label>名称</label><el-input v-model="row.label" size="small" /></div>
+            <div class="form-field"><label>SCPI 查询</label><el-input v-model="row.query" size="small" placeholder="MEAS:TEMP?" /></div>
+            <div class="form-field"><label>SCPI 下发命令</label><el-input v-model="row.command" size="small" placeholder="SOUR:TEMP {value}" /></div>
+            <div class="form-field"><label>寄存器</label><el-input v-model.number="row.register" size="small" /></div>
+            <div class="form-field">
+              <label>类型</label>
+              <el-select v-model="row.type" size="small" clearable>
+                <el-option v-for="t in ['uint16', 'int16', 'uint32', 'int32', 'float32']" :key="t" :label="t" :value="t" />
+              </el-select>
+            </div>
+            <div class="form-field"><label>系数</label><el-input v-model.number="row.scale" size="small" /></div>
+            <div class="form-field"><label>单位</label><el-input v-model="row.unit" size="small" /></div>
+          </div>
+        </div>
+        <el-empty v-if="!deviceForm.points.length" description="暂无点位" :image-size="50" />
+      </div>
       <template #footer>
         <el-button @click="addVisible = false">取消</el-button>
         <el-button type="primary" @click="saveDevice">接入设备</el-button>
@@ -727,12 +796,25 @@ function statusTag(s: string) {
 
     <!-- 实时读数 -->
     <el-dialog v-model="readVisible" title="设备实时读数" width="560px">
-      <el-table :data="readRows" size="small" border>
+      <el-table v-if="!isMobile" :data="readRows" size="small" border>
         <el-table-column prop="label" label="点位" />
         <el-table-column prop="value" label="数值" />
         <el-table-column prop="unit" label="单位" width="80" />
         <el-table-column prop="raw" label="原始值" width="120" />
       </el-table>
+      <!-- 手机端：读数两列信息并到一行，比四个窄列好读 -->
+      <div v-else class="m-cards">
+        <div v-for="(r, i) in readRows" :key="i" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">{{ r.label }}</span>
+            <span class="m-card-sub">{{ r.value }} {{ r.unit || "" }}</span>
+          </div>
+          <div class="m-card-body" v-if="r.raw !== undefined && r.raw !== null && r.raw !== ''">
+            <div class="m-card-row"><span class="m-k">原始值</span><span class="m-v">{{ r.raw }}</span></div>
+          </div>
+        </div>
+        <el-empty v-if="!readRows.length" description="暂无读数" :image-size="50" />
+      </div>
     </el-dialog>
 
     <!-- 下发控制 -->
@@ -978,6 +1060,25 @@ function statusTag(s: string) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0 16px;
+}
+/* 手机端点位卡内的字段网格：宽度自适应两列（不够宽时自动降单列），
+   容器自己滚动，顶替表格版 max-height=260 的行为 */
+.pt-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 55vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.pt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0 12px;
+  padding-top: 8px;
+}
+.pt-grid .form-field {
+  margin-bottom: 10px;
 }
 .form-field {
   margin-bottom: 14px;

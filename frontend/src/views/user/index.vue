@@ -7,6 +7,7 @@ import { useRouter } from "vue-router";
 import { apiUrl } from "../../api/base";
 import { fetchRoles } from "../../api/roles";
 import { ROLE_LABELS } from "../../stores/user";
+import { useViewport } from "../../utils/viewport";
 
 /** 角色 key：内置 admin/operator/viewer + 用户自建角色，清单由服务端 roles 表下发 */
 type RoleKey = string;
@@ -24,6 +25,7 @@ interface UserRow {
 }
 
 const router = useRouter();
+const { isMobile } = useViewport();
 
 /** 真实数据源：服务端用户表（backend/auth.mjs），不再是页面内假数据 */
 const allUsers = ref<UserRow[]>([]);
@@ -232,8 +234,8 @@ function resetSearch() {
         <el-button type="primary" :icon="Plus" @click="openAdd">新增用户</el-button>
       </div>
 
-      <!-- 用户表格 -->
-      <el-table v-loading="loading" :data="pagedUsers" style="width: 100%" class="mt16">
+      <!-- 用户表格（手机改卡片列表，见下方 v-else） -->
+      <el-table v-if="!isMobile" v-loading="loading" :data="pagedUsers" style="width: 100%" class="mt16">
         <el-table-column prop="username" label="登录名" width="140" />
         <el-table-column prop="name" label="显示名称" min-width="160" />
         <el-table-column prop="role" label="角色" width="140">
@@ -262,6 +264,24 @@ function resetSearch() {
           <el-empty description="暂无数据" />
         </template>
       </el-table>
+
+      <div v-else v-loading="loading" class="m-cards mt16">
+        <div v-for="(row, i) in pagedUsers" :key="row.username || i" class="m-card">
+          <div class="m-card-head">
+            <span class="m-card-title">{{ row.name || row.username }}</span>
+            <el-tag :type="statusOf(row) === '启用' ? 'success' : 'info'" size="small">{{ statusOf(row) }}</el-tag>
+          </div>
+          <div class="m-card-body">
+            <div class="m-card-row"><span class="m-k">登录名</span><span class="m-v">{{ row.username }}</span></div>
+            <div class="m-card-row"><span class="m-k">角色</span><span class="m-v">{{ roleName(row.role) }}</span></div>
+          </div>
+          <div class="m-card-actions">
+            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+          </div>
+        </div>
+        <el-empty v-if="!loading && !pagedUsers.length" description="暂无数据" :image-size="60" />
+      </div>
 
       <!-- 分页 -->
       <div class="pagination">

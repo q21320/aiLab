@@ -13,8 +13,10 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Check, Delete, Plus, RefreshLeft } from "@element-plus/icons-vue";
 import { createRole, deleteRole, fetchRoles, updateRole, type PageGroup, type PermLevel, type RoleInfo } from "../../api/roles";
 import { useAclStore } from "../../stores/acl";
+import { useViewport } from "../../utils/viewport";
 
 const acl = useAclStore();
+const { isMobile } = useViewport();
 
 const loading = ref(false);
 const saving = ref(false);
@@ -175,7 +177,7 @@ function grantedCount(role: RoleInfo): number {
 </script>
 
 <template>
-  <div class="roles-page">
+  <div class="roles-page" :class="{ 'is-mobile': isMobile }">
     <el-alert type="info" :closable="false" show-icon class="tip">
       角色 = 名称 + 可访问页面。用户在「用户管理」里引用角色，这里改一次，该角色下的用户全部同步生效。
       菜单、页面与后端接口共用同一份配置，隐藏即不可访问（直接调接口也会被拦截）。
@@ -412,5 +414,66 @@ function grantedCount(role: RoleInfo): number {
 .page-path {
   font-size: 12px;
   color: #b6bcc4;
+}
+
+/* ---------- 手机端 ----------
+   桌面端的「名称+路径 | 三个按钮」是一条横向行，375px 下路径会挤得按钮折行
+   （不可见/只读 一行、可写 掉下一行），整页看起来像张散架的表。
+   改成卡片：标题/路径各占一行，三个级别做成等宽分段胶囊占满整行。 */
+.roles-page.is-mobile .panel {
+  min-height: 0;
+}
+.roles-page.is-mobile .card-head {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.roles-page.is-mobile .head-actions {
+  width: 100%;
+}
+.roles-page.is-mobile .head-actions .el-button {
+  flex: 1;
+}
+.roles-page.is-mobile .group {
+  margin-top: 12px;
+}
+.roles-page.is-mobile .group-head {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.roles-page.is-mobile .page-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #f0f2f5;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.roles-page.is-mobile .page-info {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+/* EP 的 radio-button 内部是 inline-block，等宽必须整链 flex 化，否则最后一项被挤半截 */
+.roles-page.is-mobile .page-row :deep(.el-radio-group) {
+  display: flex;
+  width: 100%;
+}
+.roles-page.is-mobile .page-row :deep(.el-radio-button) {
+  flex: 1;
+}
+.roles-page.is-mobile .page-row :deep(.el-radio-button__inner) {
+  width: 100%;
+  padding: 8px 0;
+  text-align: center;
+}
+/* 名称配置区：输入框与按钮各占一行，靠 hint 分开 */
+.roles-page.is-mobile .name-form :deep(.el-form-item) {
+  width: 100%;
+  margin-right: 0;
+}
+.roles-page.is-mobile .name-form :deep(.el-input) {
+  width: 100% !important;
 }
 </style>

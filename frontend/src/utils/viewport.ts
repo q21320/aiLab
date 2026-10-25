@@ -17,9 +17,17 @@ const mobile = ref(false);
 const narrow = ref(false);
 let bound = false;
 
+/** 触屏且物理屏窄（手机）：部分安卓 webview（尤其微信）会把布局视口报成 980/1024，
+ *  只看 innerWidth 会把它当成桌面，导致卡片/抽屉整套手机端结构失效。
+ *  screen.width 不受视口缩放影响；取长短边较小值以匹配竖屏实际宽度。 */
+function coarseSmallScreen(): boolean {
+  if (!window.matchMedia("(hover: none) and (pointer: coarse)").matches) return false;
+  return Math.min(window.screen.width, window.screen.height) < 768;
+}
+
 function sync() {
-  mobile.value = window.matchMedia(MOBILE_QUERY).matches;
-  narrow.value = window.matchMedia(NARROW_QUERY).matches;
+  mobile.value = window.matchMedia(MOBILE_QUERY).matches || coarseSmallScreen();
+  narrow.value = window.matchMedia(NARROW_QUERY).matches || coarseSmallScreen();
 }
 
 export function useViewport() {
