@@ -26,6 +26,7 @@ import { Delete, Download, Edit, Plus, Refresh, Search, Upload } from "@element-
 import { createCrud, deleteCrud, listCrud, nextCrudNo, updateCrud } from "../../api/crud";
 import { attachmentUrl, MAX_UPLOAD_MB, sizeText, toRefs, uploadAttachment, type AttachmentRef } from "../../api/attachments";
 import { useAclStore } from "../../stores/acl";
+import { useViewport } from "../../utils/viewport";
 import type { LabField, LabResource } from "./resources";
 import { refOptionsOf } from "./labImport";
 import ImportDialog from "./ImportDialog.vue";
@@ -237,6 +238,43 @@ function rangeText(v: any): string {
 }
 
 const seq = (i: number) => (page.value - 1) * pageSize.value + i + 1;
+
+// ------------------------------------------------------- 手机卡片视图
+// 台账十几列在手机上横滚体验差（操作列容易被划出屏幕），换成竖排卡片；
+// 字段多寡由 resources.ts 定义驱动，这里不写死任何台账的字段名。
+const { isMobile } = useViewport();
+
+/** 卡片标题字段：第一个非自动编号的文本字段（通常是项目名/客户名），没有就取首列 */
+const cardTitleField = computed<LabField | undefined>(
+  () => tableFields.value.find((f) => f.type === "text" && !f.autoNo) || tableFields.value[0],
+);
+/** 卡片正文：标题以外的全部字段 */
+const cardBodyFields = computed(() => {
+  const t = cardTitleField.value;
+  return tableFields.value.filter((f) => f.prop !== t?.prop);
+});
+
+/** 卡片里字段的展示文本（与表格渲染同一套规则）；空值返回 "" 让模板隐藏该行，卡片不膨胀 */
+function cardValue(f: LabField, row: Record<string, any>): string {
+  const v = row[f.prop];
+  if (v === undefined || v === null || v === "") return "";
+  switch (f.type) {
+    case "select":
+      return labelOf(f, v);
+    case "switch":
+      return v ? "是" : "否";
+    case "ref":
+      return refText(f, v);
+    case "daterange":
+      return rangeText(v);
+    case "file": {
+      const n = filesOf(v).length;
+      return n ? `${n} 个附件` : "";
+    }
+    default:
+      return f.money ? money(v) : String(v);
+  }
+}
 
 async function load() {
   loading.value = true;
@@ -570,7 +608,7 @@ async function exportCsv() {
         </el-button>
       </div>
 
-      <el-table v-loading="loading" :data="rows" style="width: 100%" class="mt16" border>
+      <el-table v-if="!isMobile" v-loading="loading" :data="rows" style="width: 100%" class="mt16" border>
         <el-table-column type="index" label="序号" width="64" :index="seq" align="center" />
         <el-table-column
           v-for="f in tableFields"
@@ -619,13 +657,45 @@ async function exportCsv() {
         </template>
       </el-table>
 
+      <!-- 手机端：行→卡片，点卡片打开编辑（只读身份仅浏览） -->
+      <div v-else v-loading="loading" class="card-list mt16">
+        <div
+          v-for="(row, i) in rows"
+          :key="row.id ?? i"
+          class="rec-card"
+          :class="{ tappable: !readonly }"
+          @click="!readonly && openEdit(row)"
+        >
+          <div class="rec-head">
+            <span class="rec-seq">{{ seq(i) }}</span>
+            <span class="rec-title">{{ (cardTitleField && cardValue(cardTitleField, row)) || "（未命名）" }}</span>
+          </div>
+          <div class="rec-body">
+            <template v-for="f in cardBodyFields" :key="f.prop">
+              <div v-if="cardValue(f, row)" class="rec-row">
+                <span class="k">{{ f.label }}</span>
+                <span class="v" :class="{ money: f.money }">{{ cardValue(f, row) }}</span>
+              </div>
+            </template>
+          </div>
+          <div v-if="!readonly" class="rec-foot" @click.stop>
+            <el-button link type="primary" size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="danger" size="small" :icon="Delete" @click="handleDelete(row)">删除</el-button>
+          </div>
+        </div>
+        <el-empty
+          v-if="!loading && !rows.length"
+          :description="`暂无数据${readonly ? '' : `，点击右上角「新增${def.title}」开始录入`}`"
+        />
+      </div>
+
       <div class="pagination">
         <el-pagination
           v-model:current-page="page"
           v-model:page-size="pageSize"
           :page-sizes="[10, 20, 50]"
           :total="total"
-          layout="total, sizes, prev, pager, next, jumper"
+          :layout="isMobile ? 'prev, pager, next' : 'total, sizes, prev, pager, next, jumper'"
           background
           @current-change="load"
           @size-change="reload(1)"
@@ -635,7 +705,7 @@ async function exportCsv() {
 
     <ImportDialog v-model="importVisible" :def="def" :refs="refRows" @imported="afterImport" />
 
-    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="620px" top="6vh" destroy-on-close>
+    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="620px" top="6vh" :fullscreen="isMobile" destroy-on-close>
       <el-form ref="formRef" :model="model" :rules="rules" label-width="130px">
         <template v-for="(f, i) in def.fields" :key="f.prop">
           <div v-if="f.group && def.fields[i - 1]?.group !== f.group" class="form-group">{{ f.group }}</div>
@@ -818,5 +888,77 @@ async function exportCsv() {
 }
 .file-empty {
   color: var(--el-text-color-placeholder);
+}
+
+/* ---------- 手机端卡片列表（isMobile 时替代表格） ---------- */
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 120px;
+}
+.rec-card {
+  background: #fff;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 3px rgba(0, 21, 41, 0.05);
+}
+.rec-card.tappable {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.rec-card.tappable:active {
+  background: var(--el-fill-color-light);
+}
+.rec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+.rec-seq {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.rec-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  word-break: break-all;
+}
+.rec-body {
+  padding-top: 6px;
+}
+.rec-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 24px;
+}
+.rec-row .k {
+  flex-shrink: 0;
+  color: var(--el-text-color-secondary);
+}
+.rec-row .v {
+  text-align: right;
+  word-break: break-all;
+  color: var(--el-text-color-primary);
+}
+.rec-row .v.money {
+  font-weight: 600;
+  color: var(--el-color-primary);
+  font-variant-numeric: tabular-nums;
+}
+.rec-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 </style>

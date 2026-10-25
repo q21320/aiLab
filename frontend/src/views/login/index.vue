@@ -99,10 +99,13 @@ function handleLogin() {
   align-items: center;
   justify-content: center;
   height: 100vh;
+  /* 手机浏览器地址栏会缩变可视高，dvh 才能垂直居中不贴底（不支持的浏览器沿用上一行） */
+  height: 100dvh;
+  padding: 0 16px;
   background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
 }
 .login-box {
-  width: 400px;
+  width: min(400px, 100%);
   padding: 40px 36px;
   background: #fff;
   border-radius: 12px;
@@ -130,5 +133,15 @@ function handleLogin() {
   text-align: center;
   font-size: 12px;
   color: #c0c4cc;
+}
+
+/* ---------- 手机端 ---------- */
+@media (max-width: 767px) {
+  .login-box {
+    padding: 28px 20px;
+  }
+  .login-header h2 {
+    font-size: 20px;
+  }
 }
 </style>

@@ -8,6 +8,8 @@ import * as ElementPlusIconsVue from "@element-plus/icons-vue";
 import App from "./App.vue";
 import router from "./router";
 import "./style.css";
+// 放在 element-plus 之后：靠加载顺序覆盖组件默认内边距/宽度，不需要到处 !important
+import "./styles/responsive.css";
 
 const app = createApp(App);
 

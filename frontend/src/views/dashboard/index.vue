@@ -15,6 +15,7 @@
 //   「本月支出」= 支出项目 + 日常报销 中日期落在本月的金额合计。
 // ============================================================================
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useViewport } from "../../utils/viewport";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { ArrowRight, Box, Clock, Coin, Money, Monitor, Tickets } from "@element-plus/icons-vue";
@@ -25,6 +26,7 @@ import { useAclStore } from "../../stores/acl";
 type Row = Record<string, any>;
 
 const router = useRouter();
+const { isMobile } = useViewport();
 const acl = useAclStore();
 
 /** 低库存阈值（耗材数量 ≤ 该值时进入待办） */
@@ -479,7 +481,7 @@ onBeforeUnmount(() => {
   <div v-loading="loading" class="dashboard">
     <!-- 实验室核心指标 -->
     <el-row :gutter="20">
-      <el-col v-for="s in stats" :key="s.title" :xs="24" :sm="12" :md="6">
+      <el-col v-for="s in stats" :key="s.title" :xs="12" :sm="12" :md="6">
         <el-card shadow="hover" class="stat-card" @click="goto(s.link)">
           <div class="stat-content">
             <div class="stat-icon" :style="{ background: s.color }">
@@ -545,7 +547,8 @@ onBeforeUnmount(() => {
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="projectNo" label="项目编号" width="150" show-overflow-tooltip>
+            <!-- 项目编号在手机上挤占委托单位的空间，窄屏隐列（详情页可见） -->
+            <el-table-column v-if="!isMobile" prop="projectNo" label="项目编号" width="150" show-overflow-tooltip>
               <template #default="{ row }">{{ row.projectNo || "-" }}</template>
             </el-table-column>
             <el-table-column prop="clientName" label="委托单位" show-overflow-tooltip>
@@ -650,6 +653,44 @@ onBeforeUnmount(() => {
 }
 .chart-lg {
   height: 300px;
+}
+
+/* ---------- 手机端 ---------- */
+@media (max-width: 767px) {
+  /* 统计卡两列排布后，行与行之间要留缝（栅格 flex 换行用 row-gap） */
+  .dashboard :deep(.el-row) {
+    row-gap: 10px;
+  }
+  /* 半宽卡片里 52px 图标 + 三行文字挤不下，整体缩一档 */
+  .stat-content {
+    gap: 10px;
+  }
+  .stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+  }
+  .stat-title {
+    font-size: 12px;
+  }
+  .stat-value {
+    font-size: 19px;
+  }
+  .chart-lg {
+    height: 240px;
+  }
+  /* 头部的「查看全部」float:right 在窄屏会与标题抢位，改 flex 两端对齐 */
+  .panel-tag,
+  .panel-link {
+    float: none;
+  }
+  .panel :deep(.el-card__header) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
 }
 .todo {
   display: flex;

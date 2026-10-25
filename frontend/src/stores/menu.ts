@@ -306,6 +306,23 @@ export function flattenMenus(items: MenuItem[]): MenuItem[] {
   return out;
 }
 
+/** 定位到某个 path 的完整链路（各级分组 + 当前项），导航展开与面包屑共用 */
+export function findMenuTrail(
+  items: MenuItem[],
+  path: string,
+  trail: MenuItem[] = [],
+): MenuItem[] | null {
+  for (const it of items) {
+    const next = [...trail, it];
+    if (it.path && it.path === path) return next;
+    if (it.children?.length) {
+      const hit = findMenuTrail(it.children, path, next);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
 function findIn(items: MenuItem[], id: string): { item: MenuItem; parent: MenuItem | null; siblings: MenuItem[]; index: number } | null {
   for (let i = 0; i < items.length; i++) {
     if (items[i].id === id) return { item: items[i], parent: null, siblings: items, index: i };

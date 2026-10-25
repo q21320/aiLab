@@ -1,0 +1,186 @@
+/* ============================================================================
+ * 移动端适配（全局层）
+ *
+ * 思路：全站页面共用「头部 + 工具栏 + el-table + el-dialog + 分页」这一套骨架，
+ * 所以在断点里统一收窄内边距、放开换行、压缩控件，比给 17 个页面各写一份
+ * media query 更快也更一致。真正需要换 DOM 结构的（表格→卡片、侧栏→抽屉）
+ * 由组件用 utils/viewport.ts 的断点自己处理。
+ *
+ * 断点约定（与 viewport.ts 同步）：768 = 手机/平板，1100 = 平板/桌面。
+ * ==========================================================================*/
+
+/* ---------- 手机 (<768px) ---------- */
+@media (max-width: 767px) {
+  /* 桌面页的留白是横向溢出的主要来源，先统一压掉 */
+  .el-card__body {
+    padding: 12px;
+  }
+  .el-card__header {
+    padding: 10px 12px;
+  }
+
+  /* 工具栏：搜索框 + 若干按钮在窄屏必须换行，且输入框撑满一行
+     （类名扫自各台账/设备/告警/自动化测试页，新增同类容器往这里加） */
+  .el-toolbar,
+  .toolbar,
+  .run-bar,
+  .head-actions {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .toolbar .spacer {
+    display: none; /* 换行后“撑开靠右”失去意义 */
+  }
+  .toolbar .el-input,
+  .toolbar .el-select,
+  .toolbar .el-date-editor,
+  .run-bar .el-select,
+  .run-bar .el-input,
+  .head-actions .el-input,
+  .head-actions .el-select {
+    width: 100% !important;
+    flex: 1 1 100%;
+  }
+  .toolbar .el-button,
+  .run-bar .el-button,
+  .head-actions .el-button {
+    margin-left: 0;
+  }
+
+  /* 设备接入的表单网格：双列在手机上每列不到 170px，改单列 */
+  .form-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* 行内筛选表单（列表页顶部那排条件）改竖排占满 */
+  .el-form--inline .el-form-item {
+    display: flex;
+    width: 100%;
+    margin-right: 0;
+  }
+  .el-form--inline .el-form-item__content {
+    flex: 1;
+  }
+  .el-form--inline .el-input,
+  .el-form--inline .el-select,
+  .el-form--inline .el-date-editor {
+    width: 100%;
+  }
+
+  /* 弹窗：接近全屏，内容区自己滚，避免底部按钮被键盘顶出屏幕 */
+  .el-dialog:not(.is-fullscreen) {
+    width: 94vw !important;
+    margin-top: 5vh !important;
+    max-height: 90vh;
+  }
+  .el-dialog {
+    display: flex;
+    flex-direction: column;
+  }
+  /* 组件自己标了 is-fullscreen 的就真占满，别被上面的 90vh 缩一截 */
+  .el-dialog.is-fullscreen {
+    height: 100%;
+    max-height: none;
+    margin: 0;
+  }
+  .el-dialog__body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .el-dialog__header {
+    padding: 14px 16px 10px;
+    margin-right: 0;
+  }
+  .el-dialog__footer {
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  /* 表单：EP2 的 el-form-item 本身是 flex 行容器，只改 label 没用（label 仍被当 flex item 排在左边），
+     整项改块布局才是真的上下结构 */
+  .el-form-item {
+    display: block;
+  }
+  .el-form-item__label {
+    float: none;
+    display: block;
+    width: auto !important;
+    text-align: left !important; /* 赢过 EP 的 .el-form-item--label-right 高特异性规则 */
+    padding: 0 0 2px;
+    line-height: 22px;
+  }
+  .el-form-item__content {
+    margin-left: 0 !important;
+  }
+
+  /* 表格：保留横向滚动（列多是常态），但收紧密度、字号 */
+  .el-table {
+    font-size: 12px;
+  }
+  .el-table .cell {
+    padding: 0 6px;
+  }
+  .el-table th.el-table__cell,
+  .el-table td.el-table__cell {
+    padding: 6px 0;
+  }
+
+  /* 分页：一行放不下就换行居中，跳页框在手机上没必要 */
+  .el-pagination {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    justify-content: center;
+  }
+  .el-pagination .el-pager li,
+  .el-pagination button {
+    min-width: 30px;
+    height: 30px;
+    line-height: 30px;
+  }
+
+  /* 描述列表 / 标签页 / 描述项在窄屏的横向溢出兜底 */
+  .el-descriptions__table {
+    table-layout: fixed;
+    word-break: break-all;
+  }
+  .el-tabs__item {
+    padding: 0 12px;
+    font-size: 14px;
+  }
+
+  /* iOS 上字号 <16px 的输入框获焦会自动放大页面，体验很怪 */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+/* ---------- 抽屉导航（全局而非组件 :deep：el-drawer 被 teleport 到 body，
+   父组件的 scoped 属性不会落在它身上，:deep 选择器根本命中不了） ---------- */
+.nav-drawer .el-drawer__body {
+  padding: 0;
+  background: #001529;
+  overflow: hidden;
+}
+
+/* ---------- 手机 + 小平板 (<1100px) ---------- */
+@media (max-width: 1099px) {
+  /* 栅格：页面里大量 el-col :span="6/8" 的统计卡在小屏按 12 列折半 */
+  .el-col-4,
+  .el-col-6 {
+    width: 50%;
+  }
+  .el-col-8,
+  .el-col-16 {
+    width: 100%;
+  }
+}
+
+/* ---------- 平板竖屏 (768~1099px) ---------- */
+@media (min-width: 768px) and (max-width: 1099px) {
+  .el-dialog:not(.is-fullscreen) {
+    width: 76% !important;
+  }
+}

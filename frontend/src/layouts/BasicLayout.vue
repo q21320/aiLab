@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useUserStore } from "../stores/user";
 import { useAclStore } from "../stores/acl";
@@ -7,13 +7,13 @@ import {
   Fold,
   Expand,
   ArrowDown,
+  Close,
   Document,
   Tickets,
   Connection,
   DataAnalysis,
   Monitor,
   Files,
-  Menu as MenuIcon,
 } from "@element-plus/icons-vue";
 import {
   usePublishStore,
@@ -21,8 +21,9 @@ import {
   type PublishKind,
 } from "../lowcode/publish";
 import { ROLE_LABELS } from "../stores/user";
-import { useMenuStore, filterMenus, flattenMenus, type MenuItem } from "../stores/menu";
-import SideMenu from "./SideMenu.vue";
+import { useMenuStore, filterMenus, flattenMenus, findMenuTrail } from "../stores/menu";
+import { useViewport } from "../utils/viewport";
+import NavMenu from "./NavMenu.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -30,11 +31,20 @@ const userStore = useUserStore();
 const acl = useAclStore();
 const publishStore = usePublishStore();
 const menuStore = useMenuStore();
+const { isMobile } = useViewport();
 
 onMounted(() => publishStore.init());
 
 const isCollapse = ref(false);
-const menuRef = ref<any>(null);
+/** 手机端的抽屉导航 */
+const drawerVisible = ref(false);
+// el-menu 是 router 模式，点项即跳转；不手动收起的话抽屉会一直挡着内容
+watch(() => route.fullPath, () => (drawerVisible.value = false));
+
+function toggleNav() {
+  if (isMobile.value) drawerVisible.value = !drawerVisible.value;
+  else isCollapse.value = !isCollapse.value;
+}
 
 /** 当前身份可见的导航（可见性由服务端角色权限决定，菜单页只管名称/图标/排序/启用） */
 const navMenus = computed(() => filterMenus(menuStore.items, (path) => acl.canView(path)));
@@ -57,6 +67,14 @@ function appMenuIcon(kind: PublishKind) {
 function appMenuIndex(kind: PublishKind, id: string): string {
   return `/app/${PUBLISH_KIND_ROUTE[kind]}/${id}`;
 }
+/** NavMenu 需要的「我的应用」数据（图标组件与路由 index 在此组装好再传） */
+const navApps = computed(() =>
+  menuApps.value.map((a) => ({
+    index: appMenuIndex(a.kind, a.id),
+    name: a.name,
+    icon: appMenuIcon(a.kind),
+  })),
+);
 
 /** 可跳转的叶子（含挂载应用）：用于高亮匹配 */
 const navLeaves = computed<{ path: string; title: string }[]>(() => [
@@ -75,37 +93,8 @@ const activeMenu = computed(() => {
   return prefix?.path || route.path;
 });
 
-/**
- * 从菜单树取定位到当前项的完整链路（各级分组 + 当前页）。
- * Element Plus 只在菜单项注册变化时自动展开父级，路由跳转导致 default-active 变化时并不会展开，
- * 于是当前页藏在收起的分组里、左侧完全看不出在哪个页面——这里显式把父链打开。
- */
-function findTrail(items: MenuItem[], path: string, trail: MenuItem[] = []): MenuItem[] | null {
-  for (const it of items) {
-    const next = [...trail, it];
-    if (it.path && it.path === path) return next;
-    if (it.children?.length) {
-      const hit = findTrail(it.children, path, next);
-      if (hit) return hit;
-    }
-  }
-  return null;
-}
-const activeTrail = computed(() => findTrail(navMenus.value, activeMenu.value) || []);
-
-/** 需要展开的父分组 id（挂载应用分组固定为 mounted-apps） */
-function openGroups() {
-  const ids = activeTrail.value.slice(0, -1).map((i) => i.id);
-  if (route.path.startsWith("/app/")) ids.push("mounted-apps");
-  ids.forEach((id) => {
-    try {
-      menuRef.value?.open(id);
-    } catch {
-      /* 分组本次未渲染（无可见子项）时忽略 */
-    }
-  });
-}
-watch([activeMenu, navMenus, isCollapse], () => nextTick(openGroups), { immediate: true });
+/** 面包屑链路：分组 / … / 当前页（导航自身的展开由 NavMenu 负责） */
+const activeTrail = computed(() => findMenuTrail(navMenus.value, activeMenu.value) || []);
 
 /** 面包屑链路：分组 / … / 当前页，让人一眼看出自己在哪 */
 const crumbs = computed<string[]>(() => {
@@ -119,6 +108,9 @@ const crumbs = computed<string[]>(() => {
   if (!groups.length && (!current || current === "仪表盘")) return [];
   return [...groups, current];
 });
+
+/** 面包屑展示项：手机端只留最后一级 */
+const shownCrumbs = computed(() => (isMobile.value ? crumbs.value.slice(-1) : crumbs.value));
 
 function roleLabel(): string {
   // 角色显示名以服务端为准（内置角色也可改名）
@@ -140,58 +132,60 @@ function handleCommand(command: string) {
 
 <template>
   <el-container class="layout">
-    <!-- 侧边栏 -->
-    <el-aside :width="isCollapse ? '64px' : '210px'" class="aside">
+    <!-- 桌面侧栏（手机不用：210px 会占掉小屏一半宽度，改走抽屉） -->
+    <el-aside v-if="!isMobile" :width="isCollapse ? '64px' : '210px'" class="aside">
       <div class="logo">
         <span v-if="!isCollapse">SaaS 后台</span>
         <span v-else>S</span>
       </div>
-      <el-menu
-        ref="menuRef"
-        :default-active="activeMenu"
-        :collapse="isCollapse"
-        :collapse-transition="false"
-        router
-        background-color="#001529"
-        text-color="#b7c0cd"
-        active-text-color="#ffffff"
-        class="menu"
-      >
-        <!-- 多级导航（由「系统管理 → 导航菜单」配置，支持任意层级） -->
-        <SideMenu :items="navMenus" />
-
-        <!-- 已发布并挂载菜单的低代码应用 -->
-        <el-sub-menu v-if="menuApps.length" index="mounted-apps">
-          <template #title>
-            <el-icon><MenuIcon /></el-icon>
-            <span>我的应用</span>
-          </template>
-          <el-menu-item
-            v-for="a in menuApps"
-            :key="a.kind + a.id"
-            :index="appMenuIndex(a.kind, a.id)"
-          >
-            <el-icon><component :is="appMenuIcon(a.kind)" /></el-icon>
-            <template #title>{{ a.name }}</template>
-          </el-menu-item>
-        </el-sub-menu>
-      </el-menu>
-      <!-- 调整导航入口（管理员） -->
-      <div v-if="acl.admin && !isCollapse" class="menu-config-entry" @click="gotoMenuSetting">
-        <el-icon><MenuIcon /></el-icon> 调整导航
-      </div>
+      <NavMenu
+        :items="navMenus"
+        :apps="navApps"
+        :active="activeMenu"
+        :collapsed="isCollapse"
+        :show-config="acl.admin"
+        @config="gotoMenuSetting"
+      />
     </el-aside>
+
+    <!-- 手机导航抽屉：菜单内容与侧栏同一组件，展开状态各自维护 -->
+    <el-drawer
+      v-model="drawerVisible"
+      direction="ltr"
+      size="242px"
+      :with-header="false"
+      class="nav-drawer"
+    >
+      <div class="drawer-inner">
+        <div class="logo drawer-logo" @click="drawerVisible = false">
+          <span>SaaS 后台</span>
+          <el-icon><Close /></el-icon>
+        </div>
+        <NavMenu
+          :items="navMenus"
+          :apps="navApps"
+          :active="activeMenu"
+          :show-config="acl.admin"
+          @config="gotoMenuSetting"
+        />
+      </div>
+    </el-drawer>
 
     <el-container>
       <!-- 顶部栏 -->
       <el-header class="header">
         <div class="header-left">
-          <el-icon class="collapse-btn" @click="isCollapse = !isCollapse">
+          <!-- 手机端：真正的三横线汉堡 + 44px 触控区（EP 的 Menu 图标是九宫格，且 20px 图标按不准） -->
+          <span v-if="isMobile" class="collapse-btn hamburger" @click="toggleNav">
+            <i /><i /><i />
+          </span>
+          <el-icon v-else class="collapse-btn" @click="toggleNav">
             <component :is="isCollapse ? Expand : Fold" />
           </el-icon>
           <el-breadcrumb separator="/">
-            <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
-            <el-breadcrumb-item v-for="(c, i) in crumbs" :key="`${c}-${i}`">{{ c }}</el-breadcrumb-item>
+            <el-breadcrumb-item v-if="!isMobile" :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
+            <!-- 窄屏只留当前页名，分组链在抽屉里能看到 -->
+            <el-breadcrumb-item v-for="(c, i) in shownCrumbs" :key="`${c}-${i}`">{{ c }}</el-breadcrumb-item>
           </el-breadcrumb>
         </div>
         <div class="header-right">
@@ -200,8 +194,8 @@ function handleCommand(command: string) {
               <el-avatar :size="30" class="avatar">
                 {{ userStore.name?.charAt(0) || "U" }}
               </el-avatar>
-              <span class="username">{{ userStore.name || "用户" }}</span>
-              <el-tag size="small" effect="dark" type="warning" class="role-tag">{{ roleLabel() }}</el-tag>
+              <span v-if="!isMobile" class="username">{{ userStore.name || "用户" }}</span>
+              <el-tag v-if="!isMobile" size="small" effect="dark" type="warning" class="role-tag">{{ roleLabel() }}</el-tag>
               <el-icon><ArrowDown /></el-icon>
             </span>
             <template #dropdown>
@@ -248,60 +242,22 @@ function handleCommand(command: string) {
   overflow: hidden;
   flex-shrink: 0;
 }
-.menu {
-  border-right: none;
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
+.drawer-inner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
-/* 当前页：色块 + 左侧蓝条 + 加粗（深色导航里仅变文字色根本看不出来） */
-.menu :deep(.el-menu-item.is-active) {
-  background-image: linear-gradient(90deg, rgba(64, 158, 255, 0.42) 0%, rgba(64, 158, 255, 0.12) 100%);
-  color: #fff;
-  font-weight: 600;
-  position: relative;
-}
-.menu :deep(.el-menu-item.is-active::before) {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: #409eff;
-}
-/* 当前页所在分组（包多层时逐级都亮）：折叠/收起状态也能定位 */
-.menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
-  color: #fff;
-  font-weight: 600;
-}
-/* 深色主题下子菜单标题与弹出层配色 */
-.menu :deep(.el-sub-menu__title) {
-  color: #b7c0cd;
-}
-.menu :deep(.el-sub-menu__title:hover) {
-  background-color: #000c17;
-  color: #fff;
-}
-.menu :deep(.el-menu) {
-  background-color: #000c17;
-}
-.menu-config-entry {
-  flex-shrink: 0;
-  height: 42px;
+.drawer-logo {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-size: 13px;
-  color: #b7c0cd;
-  background: #002140;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  justify-content: space-between;
+  padding: 0 14px;
   cursor: pointer;
+  background-color: #002140;
 }
-.menu-config-entry:hover {
-  color: #fff;
-  background: #003366;
+.drawer-logo .el-icon {
+  font-size: 18px;
+  color: #b7c0cd;
 }
 .header {
   display: flex;
@@ -320,6 +276,22 @@ function handleCommand(command: string) {
   font-size: 20px;
   cursor: pointer;
   color: #333;
+}
+.hamburger {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+.hamburger i {
+  width: 20px;
+  height: 2px;
+  border-radius: 1px;
+  background: #333;
 }
 .header-right .user-info {
   display: flex;
@@ -346,5 +318,28 @@ function handleCommand(command: string) {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* ---------- 手机端：头部收窄、内容区留白压到最小 ---------- */
+@media (max-width: 767px) {
+  .header {
+    height: 52px;
+    padding: 0 10px;
+  }
+  .header-left {
+    gap: 10px;
+    min-width: 0; /* 面包屑过长时允许收缩，不把右侧头像挤出去 */
+  }
+  .header-left :deep(.el-breadcrumb) {
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .main {
+    padding: 10px;
+    /* 刘海屏底部横条不要压住分页与按钮 */
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
 }
 </style>
