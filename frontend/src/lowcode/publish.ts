@@ -19,7 +19,7 @@ import { clone } from "./schemaOps";
 import { sanitizeSchemaTree } from "./sanitize";
 import { useAuditStore } from "../stores/audit";
 
-export type PublishKind = "page" | "form" | "flow" | "report" | "screen";
+export type PublishKind = "page" | "form" | "flow" | "report" | "screen" | "html";
 
 export interface PublishedApp {
   id: string;
@@ -41,6 +41,7 @@ export const PUBLISH_KIND_LABELS: Record<PublishKind, string> = {
   flow: "流程",
   report: "报表",
   screen: "大屏",
+  html: "AI 页面",
 };
 
 export const PUBLISH_KIND_ICONS: Record<PublishKind, string> = {
@@ -49,6 +50,7 @@ export const PUBLISH_KIND_ICONS: Record<PublishKind, string> = {
   flow: "Connection",
   report: "DataAnalysis",
   screen: "Monitor",
+  html: "Files",
 };
 
 /** kind → 运行路由段 */
@@ -58,6 +60,7 @@ export const PUBLISH_KIND_ROUTE: Record<PublishKind, string> = {
   flow: "flows",
   report: "reports",
   screen: "screens",
+  html: "html",
 };
 
 const LS_KEY = "ailab.lowcode.published.v1";
@@ -118,8 +121,11 @@ export const usePublishStore = defineStore("lowcode-publish", {
       schema: any,
       opts?: { name?: string; menu?: boolean }
     ): Promise<{ app: PublishedApp; synced: boolean; error?: string }> {
-      // 发布前统一清洗：样式白名单 + 图片地址协议校验（运行页会直接渲染这份数据）
-      const safeSchema = sanitizeSchemaTree(clone(schema));
+      // 发布前统一清洗：样式白名单 + 图片地址协议校验（运行页会直接渲染这份数据）。
+      // html 类是整页源码，运行期在严格 sandbox 的不透明源 iframe 内隔离执行，
+      // 不走 SchemaRenderer 的 :style 绑定，故跳过针对结构化 schema 的 style/src 清洗，
+      // 以免给存储对象塞入无意义的空 style:{}。
+      const safeSchema = kind === "html" ? clone(schema) : sanitizeSchemaTree(clone(schema));
       const id = (safeSchema && safeSchema.id) || `${kind}_${Date.now()}`;
       const exist = this.apps.find((a) => a.kind === kind && a.id === id);
       const now = Date.now();

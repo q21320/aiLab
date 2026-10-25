@@ -4,7 +4,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Download, Delete, Search, Refresh } from "@element-plus/icons-vue";
 import { useAuditStore, type AuditEntry } from "../../stores/audit";
 import { fetchAuditStats, logsExportUrl, type AuditQuery } from "../../api/audit";
-import { ROLE_LABELS, type UserRole } from "../../stores/user";
+import { fetchRoles } from "../../api/roles";
+import { ROLE_LABELS } from "../../stores/user";
 
 const store = useAuditStore();
 
@@ -23,7 +24,15 @@ const offline = ref(false);
 const stats = ref<any>(null);
 
 const MODULES = ["权限", "应用", "排产", "样品", "安全", "存储", "其他"];
-const ROLES: UserRole[] = ["admin", "operator", "viewer"];
+/** 审计日志存的是角色 key，筛选与展示都按服务端角色表动态取（含自建角色） */
+const ROLE_KEYS = ref<{ key: string; name: string }[]>([]);
+async function loadRoles() {
+  const r = await fetchRoles();
+  if (r.ok) ROLE_KEYS.value = r.roles.map((x) => ({ key: x.key, name: x.name }));
+}
+function roleName(key: string): string {
+  return ROLE_KEYS.value.find((r) => r.key === key)?.name || ROLE_LABELS[key] || key;
+}
 
 function buildQuery(): AuditQuery {
   const q: AuditQuery = { page: page.value, pageSize: pageSize.value };
@@ -54,6 +63,7 @@ onMounted(async () => {
   await store.init();
   await load();
   await loadStats();
+  loadRoles();
 });
 
 watch([() => filters.value.module, () => filters.value.role, () => filters.value.range], () => {
@@ -148,7 +158,7 @@ const storageText = computed(() => {
         <el-option v-for="m in MODULES" :key="m" :label="m" :value="m" />
       </el-select>
       <el-select v-model="filters.role" placeholder="全部角色" clearable style="width: 140px">
-        <el-option v-for="r in ROLES" :key="r" :label="ROLE_LABELS[r]" :value="r" />
+        <el-option v-for="r in ROLE_KEYS" :key="r.key" :label="r.name" :value="r.key" />
       </el-select>
       <el-date-picker
         v-model="filters.range"
@@ -183,7 +193,7 @@ const storageText = computed(() => {
       <el-table-column prop="user" label="用户" width="120" />
       <el-table-column label="角色" width="90">
         <template #default="{ row }">
-          <el-tag size="small" :type="roleType(row.role)">{{ ROLE_LABELS[row.role as UserRole] || row.role }}</el-tag>
+          <el-tag size="small" :type="roleType(row.role)">{{ roleName(row.role) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="module" label="模块" width="90" />

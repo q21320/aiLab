@@ -74,7 +74,7 @@ function counts(kind: PublishKind): number {
   return store.apps.filter((a) => a.kind === kind).length;
 }
 
-const KINDS: PublishKind[] = ["page", "form", "flow", "report", "screen"];
+const KINDS: PublishKind[] = ["page", "form", "flow", "report", "screen", "html"];
 </script>
 
 <template>

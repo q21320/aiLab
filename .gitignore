@@ -50,3 +50,6 @@ dist-release/
 # 本地实验产物（模型/截图/临时 Python 虚拟环境，不入库）
 .models/
 .venv-ml/
+
+# 个人参考素材（路线图截图等，非项目交付物，不入库）
+ref_work/

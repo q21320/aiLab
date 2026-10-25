@@ -6,19 +6,21 @@
 //   · token 放在 HttpOnly + SameSite=Lax 的 Cookie 中，前端 JS 无法读写（防 XSS 窃取）；
 //   · 会话保存在内存（重启失效），可选持久化到磁盘以支持重启后免登录；
 //   · 角色由服务端会话推导，**绝不信任前端传来的 role**；
-//   · 权限矩阵见 ROUTE_RULES：写操作、审计、备份、设备下发均需相应角色。
+//   · 权限模型见 acl.mjs：角色 = 名称 + 页面权限（view/edit），接口按页面绑定拦截；
 //
 // 说明：本项目为单进程零依赖服务，内存会话足够；大规模部署建议替换为 Redis/DB。
 // ============================================================================
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { ADMIN_ONLY_RULES, API_PAGE_RULES, PAGE_BY_PATH } from "./acl.mjs";
 
 const SESSION_COOKIE = "ailab_sid";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时
 const MAX_SESSIONS = 2000;
 
+/** 内置角色显示名（角色表加载前的兜底，实际显示名以 roles 表为准） */
 export const ROLE_LABELS = { admin: "管理员", operator: "工程师", viewer: "访客" };
-const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const BUILTIN_ROLE_KEYS = ["admin", "operator", "viewer"];
 
 /** 默认演示账号（首次启动写入 backend/data/users.json；请在生产环境修改密码） */
 export function defaultUsers() {
@@ -44,54 +46,14 @@ function safeEqual(a, b) {
 }
 
 /**
- * 路由权限规则：按「方法 + 路径前缀」声明所需最低角色。
- * 未命中的 /api/** 默认要求登录；公开接口在 PUBLIC_PATHS 中显式列出。
+ * 接口权限不再写死在此：
+ *   · ADMIN_ONLY_RULES —— 管理类接口，恒仅管理员；
+ *   · API_PAGE_RULES   —— 业务接口绑定页面，按角色的 view/edit 判定。
+ * 两者均定义在 acl.mjs，与前端菜单/路由共用同一份页面清单。
  */
-const PUBLIC_PATHS = new Set(["/api/health", "/api/auth/login", "/api/auth/me"]);
+const PUBLIC_PATHS = new Set(["/api/health", "/api/auth/login", "/api/auth/me", "/api/auth/acl"]);
 
-const ROUTE_RULES = [
-  // 审计：查询/导出需登录（工程师及以上只读亦可），清空仅管理员
-  { method: "DELETE", prefix: "/api/audit/logs", minRole: "admin" },
-  // 备份与恢复：仅管理员（恢复会全量覆盖数据）
-  { prefix: "/api/backup", minRole: "admin" },
-  // 设备下发/删除/虚拟仪器：工程师及以上
-  { method: "POST", prefix: "/api/iot/devices", minRole: "operator" },
-  { method: "PUT", prefix: "/api/iot/devices", minRole: "operator" },
-  { method: "DELETE", prefix: "/api/iot/devices", minRole: "operator" },
-  { method: "POST", prefix: "/api/iot/write", minRole: "operator" },
-  { method: "POST", prefix: "/api/iot/simulator", minRole: "operator" },
-  // 运维设置（留存天数等）
-  { method: "PUT", prefix: "/api/iot/settings", minRole: "operator" },
-  // 告警通知配置（含 Webhook 地址）的读/改/测试：仅管理员
-  // 注意：读接口也必须鉴权——配置里含通道结构、最后错误等运维信息
-  { method: "GET", prefix: "/api/iot/notify", minRole: "admin" },
-  { method: "PUT", prefix: "/api/iot/notify", minRole: "admin" },
-  { method: "POST", prefix: "/api/iot/notify", minRole: "admin" },
-  // 自动化测试
-  { method: "POST", prefix: "/api/autotest", minRole: "operator" },
-  // 样品：查看需登录（访客可读），修改需要工程师及以上
-  { method: "GET", prefix: "/api/samples", minRole: "viewer" },
-  { method: "PUT", prefix: "/api/samples", minRole: "operator" },
-  // 排产：查看需登录（访客可读），修改需要工程师及以上
-  { method: "GET", prefix: "/api/production", minRole: "viewer" },
-  { method: "PUT", prefix: "/api/production", minRole: "operator" },
-  { method: "POST", prefix: "/api/production", minRole: "operator" },
-  // 低代码工程（设计态）：读取需登录，保存需工程师及以上
-  { method: "GET", prefix: "/api/lowcode/projects", minRole: "viewer" },
-  { method: "PUT", prefix: "/api/lowcode/projects", minRole: "operator" },
-  // 低代码发布/卸载
-  { method: "POST", prefix: "/api/lowcode/apps", minRole: "operator" },
-  { method: "PUT", prefix: "/api/lowcode/apps", minRole: "operator" },
-  { method: "DELETE", prefix: "/api/lowcode/apps", minRole: "operator" },
-  // 用户管理
-  { prefix: "/api/users", minRole: "admin" },
-  // AI 生成（消耗额度）
-  { method: "POST", prefix: "/api/ai/generate", minRole: "operator" },
-  // AI 上游模型配置（含密钥、影响全站生成行为）：读/写/测试均仅管理员
-  { method: "GET", prefix: "/api/ai/config", minRole: "admin" },
-  { method: "PUT", prefix: "/api/ai/config", minRole: "admin" },
-  { method: "POST", prefix: "/api/ai/config", minRole: "admin" },
-];
+// 旧的 minRole 层级规则已由 acl.mjs 的页面权限取代（角色可自定义，不再依赖固定层级）
 
 /** 只读接口：登录即可 */
 function isReadMethod(m) {
@@ -118,9 +80,25 @@ function parseCookies(header) {
  *   · 会话校验做**短时缓存**（默认 5 秒），避免每个 API 请求都打一次库，
  *     同时保证登出/改密在数秒内对其它请求生效；
  *   · 首次启动时若 users 表为空，自动写入内置演示账号。
+ *
+ * @param {{ db: any, acl?: any, log?: (msg: string) => void }} options
+ *   acl 由 acl.mjs 提供（角色→页面权限）；缺省时退化为内置三角色。
  */
-export async function createAuth({ db, log = console.log }) {
+export async function createAuth({ db, acl, log = console.log }) {
   const { query, transaction } = db;
+
+  /** 角色的有效权限（无 acl 时只认内置三角色） */
+  async function resolveRole(key) {
+    if (acl) return acl.resolve(key);
+    return { admin: key === "admin", name: ROLE_LABELS[key] || key, pages: {} };
+  }
+
+  /** 角色 key 是否存在（用户表单的下拉来源即角色表） */
+  async function isKnownRole(key) {
+    if (!acl) return BUILTIN_ROLE_KEYS.includes(key);
+    const opts = await acl.options();
+    return opts.some((o) => o.key === key);
+  }
 
   // ---------------------------------------------------------------- 初始化
   const existing = await query("SELECT COUNT(*)::int AS n FROM users");
@@ -261,7 +239,7 @@ export async function createAuth({ db, log = console.log }) {
     if (!/^[A-Za-z][A-Za-z0-9_]{2,31}$/.test(uname)) {
       return { ok: false, error: "用户名需 3-32 位字母/数字/下划线，且以字母开头" };
     }
-    if (!ROLE_RANK[role]) return { ok: false, error: "角色不合法" };
+    if (!(await isKnownRole(role))) return { ok: false, error: "角色不存在，请先到「角色权限」新增该角色" };
     if (String(password || "").length < 6) return { ok: false, error: "密码至少 6 位" };
 
     try {
@@ -279,7 +257,9 @@ export async function createAuth({ db, log = console.log }) {
   async function updateUser(username, patch) {
     const r = await query("SELECT username FROM users WHERE username = $1", [username]);
     if (!r.rowCount) return { ok: false, error: "用户不存在" };
-    if (patch.role != null && !ROLE_RANK[patch.role]) return { ok: false, error: "角色不合法" };
+    if (patch.role != null && !(await isKnownRole(patch.role))) {
+      return { ok: false, error: "角色不存在，请先到「角色权限」新增该角色" };
+    }
     if (patch.password && String(patch.password).length < 6) return { ok: false, error: "密码至少 6 位" };
 
     const sets = [];
@@ -318,25 +298,48 @@ export async function createAuth({ db, log = console.log }) {
   // ---------------------------------------------------------------- 守卫
   /**
    * 路由守卫：返回 true 表示已处理（拒绝），false 表示放行。
-   * 规则优先级：公开路径 > 路由规则（按前缀长度降序）> 默认要求登录。
+   * 优先级：公开路径 > 管理员放行 > 管理类接口（仅管理员）> 页面权限（view/edit）
+   *         > 默认策略（写需登录、读放行）。
+   * 管理员恒放行：权限矩阵误配也不会把管理员关在门外。
    */
   async function guard(req, res, path, method, sendJSON) {
     if (PUBLIC_PATHS.has(path)) return false;
 
     const session = await getSession(req);
+    if (session?.role === "admin") return false;
 
-    const rules = ROUTE_RULES.filter((r) => path.startsWith(r.prefix) && (!r.method || r.method === method)).sort(
-      (a, b) => b.prefix.length - a.prefix.length,
-    );
-    const rule = rules[0];
+    const match = (rules) =>
+      rules
+        .filter((r) => path.startsWith(r.prefix) && (!r.method || r.method === method))
+        .sort((a, b) => b.prefix.length - a.prefix.length)[0] || null;
 
-    if (rule) {
+    if (match(ADMIN_ONLY_RULES)) {
       if (!session) {
         sendJSON(res, 401, { error: "未登录或会话已过期", code: "UNAUTHORIZED" });
         return true;
       }
-      if (ROLE_RANK[session.role] < ROLE_RANK[rule.minRole]) {
-        sendJSON(res, 403, { error: `权限不足：需要「${ROLE_LABELS[rule.minRole]}」及以上角色`, code: "FORBIDDEN" });
+      sendJSON(res, 403, { error: "该操作仅管理员可执行", code: "FORBIDDEN" });
+      return true;
+    }
+
+    const rule = match(API_PAGE_RULES);
+    if (rule) {
+      const needEdit = !isReadMethod(method);
+      // 普通业务接口的读操作沿用平台默认策略（跨页读取与免登录大屏不受影响）
+      if (!needEdit && !rule.guardRead) return false;
+      if (!session) {
+        sendJSON(res, 401, { error: "未登录或会话已过期", code: "UNAUTHORIZED" });
+        return true;
+      }
+      const { pages } = await resolveRole(session.role);
+      const level = pages[rule.page];
+      const allowed = needEdit ? level === "edit" : level === "view" || level === "edit";
+      if (!allowed) {
+        const title = PAGE_BY_PATH[rule.page]?.title || rule.page;
+        sendJSON(res, 403, {
+          error: `权限不足：需要「${title}」页面的${needEdit ? "可写" : "只读"}权限，请联系管理员在「角色权限」中配置`,
+          code: "FORBIDDEN",
+        });
         return true;
       }
       return false;
@@ -353,6 +356,7 @@ export async function createAuth({ db, log = console.log }) {
   return {
     guard,
     getSession,
+    resolveRole,
     login,
     logout,
     changePassword,

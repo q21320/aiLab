@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.mjs",
     "build:exe": "node ../tools/build-exe.mjs",
-    "build:exe:fast": "node ../tools/build-exe.mjs --skip-frontend"
+    "build:exe:fast": "node ../tools/build-exe.mjs --skip-frontend",
+    "gen:templates": "node ../tools/gen-templates.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

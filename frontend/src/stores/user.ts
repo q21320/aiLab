@@ -1,28 +1,30 @@
 // ============================================================================
-// 统一权限（4.9 / 4.7）：三级角色 + 服务端会话
-//   admin    管理员    全部功能（含低代码平台、用户管理、系统设置、日志）
-//   operator 工程师    业务功能：应用中心、排产、样品、大屏
-//   viewer   访客      只读：应用中心、大屏、报表
+// 登录会话（服务端会话 + 本地展示缓存）
 //
 // 安全变更：登录、角色、密码校验全部由**后端**完成（backend/auth.mjs）：
 //   · 用户名/密码 POST /api/auth/login → 服务端校验并下发 HttpOnly 会话 Cookie；
 //   · 角色由 GET /api/auth/me 从服务端会话读取，localStorage 中的旧值不再可信；
 //   · 前端 token 仅为「本地是否已登录」的 UI 提示，不再是权限依据。
+//
+// 角色不再是固定三档：key 由服务端 roles 表定义（用户可自建），
+// 页面可见/可写判定全部走 stores/acl.ts（不要再在会话 store 里做角色比较）。
 // ============================================================================
 
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { apiUrl } from "../api/base";
 
-export type UserRole = "admin" | "operator" | "viewer";
+/** 角色 key（内置 admin/operator/viewer，也允许自定义角色） */
+export type UserRole = string;
 
-export const ROLE_LABELS: Record<UserRole, string> = {
+/** 内置角色显示名兜底；实际显示名以服务端 roles 表为准（acl.roleName） */
+export const ROLE_LABELS: Record<string, string> = {
   admin: "管理员",
   operator: "工程师",
   viewer: "访客",
 };
 
-/** 本地仅缓存展示用信息；权限判断始终以服务端 /api/auth/me 为准 */
+/** 本地仅缓存展示用信息；权限判断始终以服务端为准 */
 const STORAGE_KEY = "ailab.session";
 
 interface SessionUser {
@@ -36,7 +38,8 @@ function readCached(): SessionUser | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const v = JSON.parse(raw);
-    if (!v || !v.username || !ROLE_LABELS[v.role as UserRole]) return null;
+    // 角色 key 可能是自定义值，只校验必填字段，不再限定枚举
+    if (!v || !v.username || typeof v.role !== "string") return null;
     return { username: v.username, name: v.name || v.username, role: v.role };
   } catch {
     return null;
@@ -152,10 +155,10 @@ export const useUserStore = defineStore("user", () => {
     }
   }
 
-  function hasRole(roles: UserRole[] | undefined): boolean {
-    if (!roles || roles.length === 0) return true;
-    return roles.includes(role.value);
+  /** 角色显示名：优先服务端下发的角色名，退回内置映射 */
+  function roleLabel(key: UserRole = role.value): string {
+    return ROLE_LABELS[key] || key;
   }
 
-  return { token, username, name, role, ready, login, logout, refresh, changePassword, hasRole };
+  return { token, username, name, role, ready, login, logout, refresh, changePassword, roleLabel };
 });

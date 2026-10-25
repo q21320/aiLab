@@ -398,7 +398,8 @@ async function doRestore() {
     });
     const d = await r.json();
     if (d.ok) {
-      ElMessage.success("恢复成功，刷新页面后生效");
+      // 恢复含用户数据时会级联清空登录会话（外键 ON DELETE CASCADE）：主动提示重登，避免“以为成功下一步却 401”
+      ElMessage.success({ message: "恢复成功，请重新登录（恢复会重置用户会话并刷新角色权限）", duration: 5000 });
       auditStore.log("存储", "恢复备份", "从备份 JSON 恢复数据");
     } else {
       ElMessage.error("恢复失败：" + (d.error || ""));
@@ -665,8 +666,9 @@ function pickBackupFile(e: Event) {
             </div>
           </div>
           <p class="hint">
-            说明：数据持久化在服务端（apps.json / iot.json），快照与备份 JSON 可长期归档（≥3 年要求），
-            恢复时全量覆盖当前数据；前端设计稿另存于浏览器 localStorage（可导出 JSON 后随备份归档）。
+            说明：数据持久化在 PostgreSQL，备份涵盖应用 / 物联网 / 排产 / 样品 / 台账(CRUD) / 表单提交 / 用户 / 角色，
+            快照与备份 JSON 可长期归档（≥3 年要求）；恢复时全量覆盖当前数据（含用户会重置登录会话，需重新登录）。
+            台账附件的二进制不入 JSON 备份（会使文件暴涨），靠数据库卷（pgdata）做物理备份；前端设计稿另存于浏览器 localStorage（可导出 JSON 后随备份归档）。
           </p>
         </el-tab-pane>
       </el-tabs>

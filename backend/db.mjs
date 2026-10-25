@@ -136,9 +136,12 @@ CREATE TABLE IF NOT EXISTS crud_rows (
   id          TEXT NOT NULL,
   data        JSONB NOT NULL,
   updated_at  BIGINT NOT NULL,
+  -- 行在台账中的显示顺序（内存模型 rows 的下标）；不存位置则重启前后顺序会不一致
+  seq         INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (resource, id)
 );
 CREATE INDEX IF NOT EXISTS idx_crud_rows_res ON crud_rows(resource, updated_at DESC);
+-- 注：(resource, seq) 索引建在 MIGRATION_SQL 里——老表补齐 seq 列后才能建，否则 SCHEMA 阶段报列不存在
 
 -- 物联网告警（原 iotState.alerts 内存数组，上限 100 条且静默丢弃）
 CREATE TABLE IF NOT EXISTS iot_alerts (
@@ -181,7 +184,42 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(time DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_module ON audit_logs(module);
+
+-- 台账附件（项目「委外测试」「测试结果」等 file 字段上传的文件）
+-- 二进制存库而不是落磁盘：容器重建/镜像升级不会丢附件，且随 pgdata 卷一起备份，
+-- 与「业务数据都在 PostgreSQL 里」的既有约定保持一致。
+CREATE TABLE IF NOT EXISTS attachments (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  mime        TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size        BIGINT NOT NULL,
+  resource    TEXT,
+  data        BYTEA NOT NULL,
+  created_by  TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_resource ON attachments(resource);
+
+-- 角色（RBAC）：名称 + 页面权限映射；内置三角色同样落表，用户可自由新增角色
+CREATE TABLE IF NOT EXISTS roles (
+  key         TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  builtin     BOOLEAN NOT NULL DEFAULT false,
+  pages       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;
+
+/** 启动迁移（幂等）：处理老库的结构变更 */
+const MIGRATION_SQL = [
+  // 角色改为可扩展：放开早期写死的三值 CHECK，允许自定义角色 key
+  "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check",
+  // 老库补行顺序列：存量行 seq 均为 0，读取时按 updated_at 倒序兜底（新→旧），
+  // 下一次写入即由 persist() 按内存顺序回写真实 seq
+  "ALTER TABLE crud_rows ADD COLUMN IF NOT EXISTS seq INTEGER NOT NULL DEFAULT 0",
+  "CREATE INDEX IF NOT EXISTS idx_crud_rows_res_seq ON crud_rows(resource, seq)",
+];
 
 /**
  * 创建数据库门面。返回对象的方法签名与原 readJson/writeJson 兼容，
@@ -199,6 +237,7 @@ export async function createDatabase({ dataDir, log = console.log }) {
   try {
     await client.query("SELECT 1");
     await client.query(SCHEMA_SQL);
+    for (const sql of MIGRATION_SQL) await client.query(sql);
   } finally {
     client.release();
   }

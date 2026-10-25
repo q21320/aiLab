@@ -2,11 +2,19 @@
 import { ref, reactive, computed, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
-import { Search, Plus, Refresh } from "@element-plus/icons-vue";
+import { Search, Plus, Refresh, Lock } from "@element-plus/icons-vue";
+import { useRouter } from "vue-router";
 import { apiUrl } from "../../api/base";
+import { fetchRoles } from "../../api/roles";
 import { ROLE_LABELS } from "../../stores/user";
 
-type RoleKey = "admin" | "operator" | "viewer";
+/** 角色 key：内置 admin/operator/viewer + 用户自建角色，清单由服务端 roles 表下发 */
+type RoleKey = string;
+
+interface RoleOption {
+  key: string;
+  name: string;
+}
 
 interface UserRow {
   username: string;
@@ -15,10 +23,23 @@ interface UserRow {
   enabled?: boolean;
 }
 
+const router = useRouter();
+
 /** 真实数据源：服务端用户表（backend/auth.mjs），不再是页面内假数据 */
 const allUsers = ref<UserRow[]>([]);
+const roleOptions = ref<RoleOption[]>([]);
 const loading = ref(false);
 const saving = ref(false);
+
+/** 角色显示名：以服务端角色名为准（自建角色、内置角色改名都能跟上） */
+function roleName(key: string): string {
+  return roleOptions.value.find((r) => r.key === key)?.name || ROLE_LABELS[key] || key;
+}
+
+async function loadRoleOptions() {
+  const r = await fetchRoles();
+  if (r.ok) roleOptions.value = r.roles.map((x) => ({ key: x.key, name: x.name }));
+}
 
 /** 状态字段：服务端只有 enabled，这里映射成中文标签便于展示 */
 function statusOf(u: UserRow): "启用" | "禁用" {
@@ -41,7 +62,10 @@ async function loadUsers() {
     loading.value = false;
   }
 }
-onMounted(loadUsers);
+onMounted(() => {
+  loadUsers();
+  loadRoleOptions();
+});
 
 // 搜索与筛选
 const keyword = ref("");
@@ -55,7 +79,7 @@ const pageSize = ref(5);
 const filteredUsers = computed(() =>
   allUsers.value.filter((u) => {
     const k = keyword.value.trim();
-    const matchKeyword = !k || u.name.includes(k) || u.username.includes(k) || ROLE_LABELS[u.role].includes(k);
+    const matchKeyword = !k || u.name.includes(k) || u.username.includes(k) || roleName(u.role).includes(k);
     const matchStatus = !statusFilter.value || statusOf(u) === statusFilter.value;
     return matchKeyword && matchStatus;
   })
@@ -91,7 +115,9 @@ const rules: FormRules = {
 function openAdd() {
   isEdit.value = false;
   dialogTitle.value = "新增用户";
-  Object.assign(form, { username: "", name: "", role: "viewer", password: "", status: "启用" });
+  // 默认选第一个非管理员角色，避免新建账号误获最高权限
+  const first = roleOptions.value.find((r) => r.key !== "admin")?.key || "viewer";
+  Object.assign(form, { username: "", name: "", role: first, password: "", status: "启用" });
   dialogVisible.value = true;
 }
 
@@ -202,6 +228,7 @@ function resetSearch() {
         </el-select>
         <el-button :icon="Refresh" @click="resetSearch">重置</el-button>
         <div class="spacer" />
+        <el-button :icon="Lock" @click="router.push('/roles')">角色权限配置</el-button>
         <el-button type="primary" :icon="Plus" @click="openAdd">新增用户</el-button>
       </div>
 
@@ -209,9 +236,9 @@ function resetSearch() {
       <el-table v-loading="loading" :data="pagedUsers" style="width: 100%" class="mt16">
         <el-table-column prop="username" label="登录名" width="140" />
         <el-table-column prop="name" label="显示名称" min-width="160" />
-        <el-table-column prop="role" label="角色" width="120">
+        <el-table-column prop="role" label="角色" width="140">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{ ROLE_LABELS[row.role as RoleKey] }}</el-tag>
+            <el-tag size="small" effect="plain">{{ roleName(row.role) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -268,10 +295,9 @@ function resetSearch() {
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width: 100%">
-            <el-option label="管理员" value="admin" />
-            <el-option label="工程师" value="operator" />
-            <el-option label="访客" value="viewer" />
+            <el-option v-for="r in roleOptions" :key="r.key" :label="r.name" :value="r.key" />
           </el-select>
+          <div class="role-hint">角色 = 一组页面权限；想调「哪个页面给谁看」，去「系统管理 → 角色权限」改角色，改后本账号即时生效。</div>
         </el-form-item>
         <el-form-item label="状态">
           <el-radio-group v-model="form.status">
@@ -304,5 +330,10 @@ function resetSearch() {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+.role-hint {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.6;
 }
 </style>

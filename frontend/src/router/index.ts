@@ -1,9 +1,16 @@
 import { createRouter, createWebHistory } from "vue-router";
 import type { RouteRecordRaw } from "vue-router";
 import BasicLayout from "../layouts/BasicLayout.vue";
-import { useUserStore, type UserRole } from "../stores/user";
+import { useUserStore } from "../stores/user";
+import { useAclStore } from "../stores/acl";
 
-/** 路由权限：roles 省略表示全部角色可见 */
+// ============================================================================
+// 路由表
+//
+// 权限不再写在这里：meta 只描述标题/图标与业务参数，
+// 谁能进哪个页面由服务端「角色权限」（stores/acl.ts → /api/auth/acl）统一决定，
+// 菜单渲染、路由守卫、接口拦截三处共用同一份配置。
+// ============================================================================
 const routes: RouteRecordRaw[] = [
   {
     path: "/login",
@@ -26,7 +33,7 @@ const routes: RouteRecordRaw[] = [
         path: "lowcode",
         name: "LowCode",
         component: () => import("../views/lowcode/index.vue"),
-        meta: { title: "低代码开发平台", icon: "MagicStick", roles: ["admin"] as UserRole[] },
+        meta: { title: "低代码开发平台", icon: "MagicStick" },
       },
       {
         path: "apps",
@@ -44,61 +51,117 @@ const routes: RouteRecordRaw[] = [
         path: "formdata",
         name: "FormData",
         component: () => import("../views/formdata/index.vue"),
-        meta: { title: "表单数据", icon: "Document", roles: ["admin", "operator"] as UserRole[] },
+        meta: { title: "表单数据", icon: "Document" },
       },
       {
         path: "iot",
         name: "IotDevices",
         component: () => import("../views/iot/index.vue"),
-        meta: { title: "设备接入", icon: "Monitor", roles: ["admin", "operator"] as UserRole[] },
+        meta: { title: "设备接入", icon: "Monitor" },
       },
       {
         path: "alerts",
         name: "IotAlerts",
         component: () => import("../views/alerts/index.vue"),
-        meta: { title: "告警管理", icon: "Warning", roles: ["admin", "operator", "viewer"] as UserRole[] },
+        meta: { title: "告警管理", icon: "Warning" },
       },
       {
         path: "autotest",
         name: "AutoTest",
         component: () => import("../views/autotest/index.vue"),
-        meta: { title: "自动化测试", icon: "Cpu", roles: ["admin", "operator"] as UserRole[] },
+        meta: { title: "自动化测试", icon: "Cpu" },
       },
       {
         path: "production",
         name: "Production",
         component: () => import("../views/production/index.vue"),
-        meta: { title: "排产管理", icon: "Operation", roles: ["admin", "operator"] as UserRole[] },
+        meta: { title: "排产管理", icon: "Operation" },
       },
       {
         path: "samples",
         name: "Samples",
         component: () => import("../views/samples/index.vue"),
-        meta: { title: "样品管理", icon: "Box", roles: ["admin", "operator"] as UserRole[] },
+        meta: { title: "样品管理", icon: "Box" },
       },
+      // ---- 实验室管理·台账模块（字段见 views/lab/resources.ts，数据走通用 CRUD）----
+      {
+        path: "lab/projects",
+        name: "LabProjects",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "测试项目", icon: "Tickets", labResource: "projects" },
+      },
+      {
+        path: "lab/outsource-projects",
+        name: "LabOutsourceProjects",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "委外项目", icon: "Van", labResource: "outsourceProjects" },
+      },
+      {
+        path: "lab/reimbursements",
+        name: "LabReimbursements",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "日常报销", icon: "Coin", labResource: "reimbursements" },
+      },
+      {
+        path: "lab/finance/income",
+        name: "LabFinIncome",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "收入项目", icon: "TrendCharts", labResource: "income" },
+      },
+      {
+        path: "lab/finance/expense",
+        name: "LabFinExpense",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "支出项目", icon: "Histogram", labResource: "expense" },
+      },
+      {
+        path: "lab/customers",
+        name: "LabCustomers",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "客户信息", icon: "Service", labResource: "customers" },
+      },
+      {
+        path: "lab/equipment",
+        name: "LabEquipment",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "设备信息", icon: "Monitor", labResource: "equipment" },
+      },
+      {
+        path: "lab/consumables",
+        name: "LabConsumables",
+        component: () => import("../views/lab/index.vue"),
+        meta: { title: "耗材信息", icon: "Box", labResource: "consumables" },
+      },
+      // ---- 系统管理 ----
       {
         path: "menus",
         name: "Menus",
         component: () => import("../views/menu/index.vue"),
-        meta: { title: "导航菜单", icon: "Menu", roles: ["admin"] as UserRole[] },
+        meta: { title: "导航菜单", icon: "Menu" },
+      },
+      {
+        path: "roles",
+        name: "Roles",
+        component: () => import("../views/roles/index.vue"),
+        meta: { title: "角色权限", icon: "Lock" },
       },
       {
         path: "logs",
         name: "Logs",
         component: () => import("../views/logs/index.vue"),
-        meta: { title: "操作日志", icon: "Notebook", roles: ["admin"] as UserRole[] },
+        meta: { title: "操作日志", icon: "Notebook" },
       },
       {
         path: "user",
         name: "User",
         component: () => import("../views/user/index.vue"),
-        meta: { title: "用户管理", icon: "UserFilled", roles: ["admin"] as UserRole[] },
+        meta: { title: "用户管理", icon: "UserFilled" },
       },
       {
         path: "setting",
         name: "Setting",
         component: () => import("../views/setting/index.vue"),
-        meta: { title: "系统设置", icon: "Setting", roles: ["admin"] as UserRole[] },
+        meta: { title: "系统设置", icon: "Setting" },
       },
     ],
   },
@@ -113,30 +176,33 @@ const router = createRouter({
   routes,
 });
 
-// 全局前置守卫：未登录跳转到登录页（带 redirect）；角色不满足返回仪表盘
-// 安全：角色来自服务端会话（/api/auth/me），localStorage 中自报的角色不再可信
-let sessionChecked = false;
+// 全局前置守卫：未登录跳登录页；无页面权限落到第一个可见页
+// 安全：身份与权限均来自服务端（/api/auth/me、/api/auth/acl），本地缓存不作为依据
 router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore();
+  const acl = useAclStore();
   document.title = (to.meta.title as string) || "实验室数字化管理平台";
 
-  // 首次进入（或刷新）时向服务端确认会话，避免仅凭本地缓存放行
-  if (!sessionChecked) {
-    await userStore.refresh();
-    sessionChecked = true;
-  }
+  // 首次进入（或刷新）时向服务端确认会话，并同步拉取该身份的页面权限
+  // 两个 store 各自带节流/就绪标记，登出与登录由调用方重置，无需额外全局开关
+  if (!userStore.ready) await userStore.refresh();
+  if (userStore.token && !acl.ready) await acl.load();
 
   if (to.meta.public) {
-    // 已登录用户访问登录页 → 直接回首页
-    if (to.path === "/login" && userStore.token) return next("/dashboard");
+    // 已登录用户访问登录页 → 回到自己有权访问的首屏
+    if (to.path === "/login" && userStore.token) return next(acl.firstViewable());
     return next();
   }
 
   if (!userStore.token) {
     return next({ path: "/login", query: to.fullPath === "/" ? {} : { redirect: to.fullPath } });
   }
-  if ((to.meta.roles as UserRole[] | undefined) && !userStore.hasRole(to.meta.roles as UserRole[])) {
-    return next("/dashboard");
+
+  if (!acl.canView(to.path)) {
+    const target = acl.firstViewable();
+    // 连一个可见页都没有时停在原处，由页面内的接口 403 兜底提示
+    if (target === to.path) return next();
+    return next(target);
   }
   next();
 });

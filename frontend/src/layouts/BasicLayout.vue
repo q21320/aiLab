@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useUserStore } from "../stores/user";
+import { useAclStore } from "../stores/acl";
 import {
   Fold,
   Expand,
@@ -11,6 +12,7 @@ import {
   Connection,
   DataAnalysis,
   Monitor,
+  Files,
   Menu as MenuIcon,
 } from "@element-plus/icons-vue";
 import {
@@ -18,26 +20,53 @@ import {
   PUBLISH_KIND_ROUTE,
   type PublishKind,
 } from "../lowcode/publish";
-import { ROLE_LABELS, type UserRole } from "../stores/user";
-import { useMenuStore, filterMenus, flattenMenus } from "../stores/menu";
+import { ROLE_LABELS } from "../stores/user";
+import { useMenuStore, filterMenus, flattenMenus, type MenuItem } from "../stores/menu";
 import SideMenu from "./SideMenu.vue";
 
 const route = useRoute();
 const router = useRouter();
 const userStore = useUserStore();
+const acl = useAclStore();
 const publishStore = usePublishStore();
 const menuStore = useMenuStore();
 
 onMounted(() => publishStore.init());
 
 const isCollapse = ref(false);
+const menuRef = ref<any>(null);
 
-/** 当前角色可见的多级菜单 */
-const navMenus = computed(() => filterMenus(menuStore.items, userStore.role));
+/** 当前身份可见的导航（可见性由服务端角色权限决定，菜单页只管名称/图标/排序/启用） */
+const navMenus = computed(() => filterMenus(menuStore.items, (path) => acl.canView(path)));
+
+// 已发布且「挂载菜单+启用」的应用，动态出现在左侧导航（分组：我的应用）
+const menuApps = computed(() =>
+  acl.canView("/apps") ? publishStore.apps.filter((a) => a.menu && a.enable) : [],
+);
+const KIND_MENU_ICONS: Record<PublishKind, any> = {
+  page: Document,
+  form: Tickets,
+  flow: Connection,
+  report: DataAnalysis,
+  screen: Monitor,
+  html: Files,
+};
+function appMenuIcon(kind: PublishKind) {
+  return KIND_MENU_ICONS[kind];
+}
+function appMenuIndex(kind: PublishKind, id: string): string {
+  return `/app/${PUBLISH_KIND_ROUTE[kind]}/${id}`;
+}
+
+/** 可跳转的叶子（含挂载应用）：用于高亮匹配 */
+const navLeaves = computed<{ path: string; title: string }[]>(() => [
+  ...flattenMenus(navMenus.value).filter((i) => i.path),
+  ...menuApps.value.map((a) => ({ path: appMenuIndex(a.kind, a.id), title: a.name })),
+]);
 
 /** 当前高亮：优先匹配 fullPath（支持 /lowcode?tab=form 这类带参数的入口），其次匹配路径前缀 */
 const activeMenu = computed(() => {
-  const flat = flattenMenus(navMenus.value).filter((i) => i.path);
+  const flat = navLeaves.value;
   const exact = flat.find((i) => i.path === route.fullPath) || flat.find((i) => i.path === route.path);
   if (exact) return exact.path;
   const prefix = flat
@@ -46,23 +75,54 @@ const activeMenu = computed(() => {
   return prefix?.path || route.path;
 });
 
-// 已发布且「挂载菜单+启用」的应用，动态出现在左侧导航（分组：我的应用）
-const menuApps = computed(() => publishStore.apps.filter((a) => a.menu && a.enable));
-const KIND_MENU_ICONS: Record<PublishKind, any> = {
-  page: Document,
-  form: Tickets,
-  flow: Connection,
-  report: DataAnalysis,
-  screen: Monitor,
-};
-function appMenuIcon(kind: PublishKind) {
-  return KIND_MENU_ICONS[kind];
+/**
+ * 从菜单树取定位到当前项的完整链路（各级分组 + 当前页）。
+ * Element Plus 只在菜单项注册变化时自动展开父级，路由跳转导致 default-active 变化时并不会展开，
+ * 于是当前页藏在收起的分组里、左侧完全看不出在哪个页面——这里显式把父链打开。
+ */
+function findTrail(items: MenuItem[], path: string, trail: MenuItem[] = []): MenuItem[] | null {
+  for (const it of items) {
+    const next = [...trail, it];
+    if (it.path && it.path === path) return next;
+    if (it.children?.length) {
+      const hit = findTrail(it.children, path, next);
+      if (hit) return hit;
+    }
+  }
+  return null;
 }
-function appMenuIndex(kind: PublishKind, id: string): string {
-  return `/app/${PUBLISH_KIND_ROUTE[kind]}/${id}`;
+const activeTrail = computed(() => findTrail(navMenus.value, activeMenu.value) || []);
+
+/** 需要展开的父分组 id（挂载应用分组固定为 mounted-apps） */
+function openGroups() {
+  const ids = activeTrail.value.slice(0, -1).map((i) => i.id);
+  if (route.path.startsWith("/app/")) ids.push("mounted-apps");
+  ids.forEach((id) => {
+    try {
+      menuRef.value?.open(id);
+    } catch {
+      /* 分组本次未渲染（无可见子项）时忽略 */
+    }
+  });
 }
-function roleLabel(role: string): string {
-  return ROLE_LABELS[role as UserRole] || role;
+watch([activeMenu, navMenus, isCollapse], () => nextTick(openGroups), { immediate: true });
+
+/** 面包屑链路：分组 / … / 当前页，让人一眼看出自己在哪 */
+const crumbs = computed<string[]>(() => {
+  const trail = activeTrail.value;
+  const groups = trail.slice(0, -1).map((i) => i.title);
+  const current =
+    trail[trail.length - 1]?.title ||
+    menuApps.value.find((a) => appMenuIndex(a.kind, a.id) === activeMenu.value)?.name ||
+    (route.meta.title as string) ||
+    "";
+  if (!groups.length && (!current || current === "仪表盘")) return [];
+  return [...groups, current];
+});
+
+function roleLabel(): string {
+  // 角色显示名以服务端为准（内置角色也可改名）
+  return acl.roleName || ROLE_LABELS[userStore.role] || userStore.role;
 }
 function gotoMenuSetting() {
   router.push("/menus");
@@ -72,6 +132,7 @@ function gotoMenuSetting() {
 function handleCommand(command: string) {
   if (command === "logout") {
     userStore.logout();
+    acl.reset();
     router.push("/login");
   }
 }
@@ -86,6 +147,7 @@ function handleCommand(command: string) {
         <span v-else>S</span>
       </div>
       <el-menu
+        ref="menuRef"
         :default-active="activeMenu"
         :collapse="isCollapse"
         :collapse-transition="false"
@@ -96,7 +158,7 @@ function handleCommand(command: string) {
         class="menu"
       >
         <!-- 多级导航（由「系统管理 → 导航菜单」配置，支持任意层级） -->
-        <SideMenu :items="navMenus" :role="userStore.role" />
+        <SideMenu :items="navMenus" />
 
         <!-- 已发布并挂载菜单的低代码应用 -->
         <el-sub-menu v-if="menuApps.length" index="mounted-apps">
@@ -115,7 +177,7 @@ function handleCommand(command: string) {
         </el-sub-menu>
       </el-menu>
       <!-- 调整导航入口（管理员） -->
-      <div v-if="userStore.role === 'admin' && !isCollapse" class="menu-config-entry" @click="gotoMenuSetting">
+      <div v-if="acl.admin && !isCollapse" class="menu-config-entry" @click="gotoMenuSetting">
         <el-icon><MenuIcon /></el-icon> 调整导航
       </div>
     </el-aside>
@@ -129,7 +191,7 @@ function handleCommand(command: string) {
           </el-icon>
           <el-breadcrumb separator="/">
             <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
-            <el-breadcrumb-item>{{ route.meta.title }}</el-breadcrumb-item>
+            <el-breadcrumb-item v-for="(c, i) in crumbs" :key="`${c}-${i}`">{{ c }}</el-breadcrumb-item>
           </el-breadcrumb>
         </div>
         <div class="header-right">
@@ -139,7 +201,7 @@ function handleCommand(command: string) {
                 {{ userStore.name?.charAt(0) || "U" }}
               </el-avatar>
               <span class="username">{{ userStore.name || "用户" }}</span>
-              <el-tag size="small" effect="dark" type="warning" class="role-tag">{{ roleLabel(userStore.role) }}</el-tag>
+              <el-tag size="small" effect="dark" type="warning" class="role-tag">{{ roleLabel() }}</el-tag>
               <el-icon><ArrowDown /></el-icon>
             </span>
             <template #dropdown>
@@ -191,6 +253,27 @@ function handleCommand(command: string) {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+}
+/* 当前页：色块 + 左侧蓝条 + 加粗（深色导航里仅变文字色根本看不出来） */
+.menu :deep(.el-menu-item.is-active) {
+  background-image: linear-gradient(90deg, rgba(64, 158, 255, 0.42) 0%, rgba(64, 158, 255, 0.12) 100%);
+  color: #fff;
+  font-weight: 600;
+  position: relative;
+}
+.menu :deep(.el-menu-item.is-active::before) {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #409eff;
+}
+/* 当前页所在分组（包多层时逐级都亮）：折叠/收起状态也能定位 */
+.menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
+  color: #fff;
+  font-weight: 600;
 }
 /* 深色主题下子菜单标题与弹出层配色 */
 .menu :deep(.el-sub-menu__title) {

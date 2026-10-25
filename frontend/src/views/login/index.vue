@@ -4,11 +4,13 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { User, Lock } from "@element-plus/icons-vue";
-import { useUserStore, ROLE_LABELS } from "../../stores/user";
+import { useUserStore } from "../../stores/user";
+import { useAclStore } from "../../stores/acl";
 
 const router = useRouter();
 const route = useRoute();
 const userStore = useUserStore();
+const acl = useAclStore();
 
 const formRef = ref<FormInstance>();
 const loading = ref(false);
@@ -32,10 +34,13 @@ function handleLogin() {
     const res = await userStore.login(form.username, form.password);
     loading.value = false;
     if (res.ok) {
-      ElMessage.success(`登录成功：${userStore.name}（${ROLE_LABELS[userStore.role]}）`);
-      // 登录后回跳到被拦截的目标页（原先固定跳 dashboard，深链丢失）
+      // 登录成功后立即拉取该身份的页面权限，菜单/首屏不用再等路由守卫
+      await acl.load(true);
+      ElMessage.success(`登录成功：${userStore.name}（${acl.roleName || userStore.roleLabel()}）`);
+      // 登录后回跳到被拦截的目标页；目标页无权限则落到自己有权限的首屏
       const redirect = typeof route.query.redirect === "string" ? route.query.redirect : "";
-      router.replace(redirect && redirect.startsWith("/") ? redirect : "/dashboard");
+      const target = redirect && redirect.startsWith("/") ? redirect : acl.firstViewable();
+      router.replace(acl.canView(target) ? target : acl.firstViewable());
     } else {
       ElMessage.error(res.error || "用户名或密码错误");
     }
@@ -81,7 +86,7 @@ function handleLogin() {
         </el-form-item>
       </el-form>
       <div class="login-tip">
-        演示账号（三级权限）：admin / admin123（管理员）· engineer / eng123（工程师）· viewer / view123（访客）
+        演示账号：admin / admin123（管理员）· engineer / eng123（工程师）· viewer / view123（访客）；具体能看到哪些页面由「角色权限」配置决定
       </div>
       <div class="login-tip">密码由服务端校验（SHA-256 散列存储），操作均写入审计日志</div>
     </div>

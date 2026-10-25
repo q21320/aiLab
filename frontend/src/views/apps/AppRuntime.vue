@@ -12,6 +12,7 @@ import {
 import SchemaRenderer from "../../lowcode/SchemaRenderer.vue";
 import ReportBlockView from "../../lowcode/ReportBlockView.vue";
 import ScreenWidgetView from "../../lowcode/ScreenWidgetView.vue";
+import HtmlRunView from "../../lowcode/HtmlRunView.vue";
 import { submitToCustomApi, submitToPlatform } from "../../api/forms";
 import type { FormSchema } from "../../lowcode/formTypes";
 import type { FlowSchema, FlowEdge, FlowNode } from "../../lowcode/flowTypes";
@@ -31,6 +32,7 @@ const ROUTE_KIND: Record<string, PublishKind> = {
   flows: "flow",
   reports: "report",
   screens: "screen",
+  html: "html",
 };
 
 const app = computed<PublishedApp | undefined>(() => {
@@ -238,6 +240,13 @@ function pageSchema(): PageSchema | null {
   return app.value?.kind === "page" ? (app.value.schema as PageSchema) : null;
 }
 
+// ---------------------------------------------------------------------------
+// AI 自由页面（kind:"html"）运行：整页源码交给沙箱桥接容器渲染
+// ---------------------------------------------------------------------------
+const htmlSchema = computed<{ html?: string } | null>(() =>
+  app.value?.kind === "html" ? (app.value.schema as { html?: string }) : null
+);
+
 async function fullscreen() {
   try {
     if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
@@ -433,6 +442,18 @@ async function fullscreen() {
           </div>
         </div>
       </div>
+
+      <!-- ======================= AI 自由页面（HTML） ======================= -->
+      <div v-else-if="app.kind === 'html' && htmlSchema" class="runtime-html-wrap">
+        <div class="runtime-bar">
+          <el-button size="small" :icon="ArrowLeft" @click="goBack">返回应用中心</el-button>
+          <span class="runtime-title">{{ app.name }}</span>
+          <el-tag size="small" effect="plain">AI 页面</el-tag>
+        </div>
+        <div class="runtime-html-body">
+          <HtmlRunView :html="htmlSchema.html || ''" />
+        </div>
+      </div>
     </template>
 
     <el-skeleton v-else :rows="6" animated />
@@ -577,5 +598,24 @@ async function fullscreen() {
 .sw-frame {
   position: absolute;
   overflow: hidden;
+}
+.runtime-html-wrap {
+  margin: -20px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 60px);
+}
+.runtime-html-wrap .runtime-bar {
+  padding: 8px 20px;
+  margin: 0;
+  background: #fff;
+  border-bottom: 1px solid #ebeef5;
+}
+.runtime-html-body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  background: #f0f2f5;
 }
 </style>

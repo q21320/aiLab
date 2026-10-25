@@ -55,6 +55,8 @@ services:
       AI_MODEL: ${AI_MODEL:-qwen-max}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_TEMPERATURE: ${AI_TEMPERATURE:-0.4}
+      # 台账附件单文件大小上限（MB）；二进制存 PostgreSQL，不依赖容器文件系统
+      AILAB_UPLOAD_MAX_MB: ${AILAB_UPLOAD_MAX_MB:-10}
       # 时区：影响采集时间与审计日志时间戳
       TZ: ${TZ:-Asia/Shanghai}
     ports:

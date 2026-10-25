@@ -876,3 +876,119 @@ export async function refineFormSchema(current: FormSchema, instruction: string,
   }
   throw new Error("没检测到有效改动。请把要求说具体些，例如：新增一个邮箱字段、把姓名字段设为必填");
 }
+
+// ============================================================================
+// AI 自由页面（kind: "html"）：整页 HTML 直出 + 追问，页面靠 __ailab 桥接调后端
+// ----------------------------------------------------------------------------
+// 运行期页面在严格 sandbox（不透明源）的 iframe 里执行，直接 fetch 不带会话 Cookie，
+// 因此约定取数只能用注入的 window.__ailab.*，由父页面代跑同源 /api/* 请求。
+// 这套约定必须与 HtmlRunView.vue 注入的桥接客户端保持一致。
+// ============================================================================
+
+/** 资源接地块（HTML 版：给出真实资源名与其 REST 端点） */
+function buildHtmlGroundingBlock(resources: ResourceInfo[], maxRes = 20, maxFields = 16): string {
+  const fixed = `## 平台可用的后端接口（均为同源相对路径，用 window.__ailab 调用）
+- GET  /api/crud/resources           返回 { resources:[{name,count,fields:[{prop,label,type}]}] }（所有数据资源清单）
+- GET  /api/crud/<资源名>?page=1&pageSize=20&keyword=  列表（返回 { rows, total } 结构，字段以实际返回为准）
+- POST /api/crud/<资源名>            新建（body 为对象）
+- PUT  /api/crud/<资源名>/<id>       更新   DELETE /api/crud/<资源名>/<id> 删除
+- GET  /api/iot/overview             物联网概览（在线/告警/能耗）
+- GET  /api/iot/devices              设备列表
+- GET  /api/auth/me                  当前登录用户（{ username, role } 等）`;
+  if (!resources.length) {
+    return `${fixed}\n\n（当前平台还没有已注册的 CRUD 资源；可先展示其它接口数据或静态内容。）`;
+  }
+  const shown = resources.slice(0, maxRes);
+  const lines = shown.map((r) => {
+    const all = r.fields || [];
+    const fields = all
+      .slice(0, maxFields)
+      .map((f) => `${f.prop}(${f.label || f.prop})`)
+      .join(", ");
+    const more = all.length > maxFields ? ` …等 ${all.length} 字段` : "";
+    return `- 资源 "${r.name}"（${r.count} 条）端点 /api/crud/${r.name}，字段: ${fields || "（暂无数据，字段未知）"}${more}`;
+  });
+  const moreRes = resources.length > shown.length ? `\n（另有 ${resources.length - shown.length} 个资源未列出）` : "";
+  return `${fixed}\n\n## 平台现有的真实数据资源（务必使用真实资源名与真实字段 prop）\n${lines.join("\n")}${moreRes}`;
+}
+
+const HTML_API_DOC = `## 与后端交互的唯一方式（务必遵守）
+你生成的页面会在一个隔离的沙箱 iframe 中运行，**不能**直接使用 fetch / XMLHttpRequest / WebSocket（它们不带登录会话，会 401）。
+运行环境会注入一个全局对象 window.__ailab，用它发起所有后端请求（返回 Promise，成功解析为后端 JSON，失败抛错）：
+- window.__ailab.get(path)                → Promise<any>
+- window.__ailab.post(path, bodyObject)   → Promise<any>
+- window.__ailab.put(path, bodyObject)    → Promise<any>
+- window.__ailab.del(path)                → Promise<any>
+其中 path 必须是同源相对路径且以 /api/ 开头，例如 "/api/crud/products"。
+示例：
+  const box = document.getElementById('list');
+  window.__ailab.get('/api/crud/products?page=1&pageSize=20')
+    .then((data) => { box.innerHTML = (data.rows || []).map(r => '<tr><td>'+r.name+'</td></tr>').join(''); })
+    .catch((e) => { box.textContent = '加载失败：' + e.message; });`;
+
+const HTML_STRICT_RULES = `## 输出要求（严格）
+1. 只输出一个完整的、可独立运行的 HTML 文档（从 <!DOCTYPE html> 到 </html>），不要任何解释文字
+2. 允许把内容放在 \`\`\`html 代码块里，但代码块内必须是完整页面
+3. CSS 用 <style> 内联、JS 用 <script> 内联；页面要美观、响应式、有真实中文文案
+4. 需要外部库（如图表）时，只能引用 https CDN，不要用 http；不要把任何密钥写进页面
+5. 所有后端数据都通过 window.__ailab.* 获取；加载时给占位/骨架，出错时要 catch 并在页面上显示原因，不要白屏
+6. 不要臆造资源名/字段，按下方“真实数据资源”里的名称与 prop 来写`;
+
+/** 从模型输出中提取 HTML 源码（剥离思考段与 ``` 围栏） */
+function extractHtml(text: string): string {
+  const t = stripThinking(text || "").trim();
+  const md = t.match(/```(?:html|HTML)?\s*([\s\S]*?)\s*```/);
+  const body = (md ? md[1] : t).trim();
+  return body;
+}
+
+/** 粗略校验：像一份 HTML（含标签），过滤掉模型偶尔的纯文字答复 */
+function looksLikeHtml(s: string): boolean {
+  return s.length > 40 && /<(html|body|div|h[1-6]|p|table|section|script|style|ul|form|button|main|header)\b/i.test(s);
+}
+
+/** 调用后端 AI 代理，带一次“上次不是 HTML”的自愈重试，返回 HTML 源码 */
+async function callForHtml(prompt: string, system: string): Promise<string> {
+  let html = extractHtml(await callAI(prompt, system));
+  if (!looksLikeHtml(html)) {
+    html = extractHtml(
+      await callAI(prompt, system + "\n\n（上一次输出不是合法 HTML。请只输出一个从 <!DOCTYPE html> 到 </html> 的完整页面，可放在 ```html 代码块内。）"),
+    );
+  }
+  if (!looksLikeHtml(html)) throw new Error("模型未能返回可用的 HTML 页面，请换个说法后重试");
+  return html;
+}
+
+export interface HtmlGenerateResult {
+  html: string;
+}
+
+export async function generateHtml(prompt: string, resources?: ResourceInfo[]): Promise<HtmlGenerateResult> {
+  const grounded = resources ?? (await loadGrounding());
+  const reserve = HTML_STRICT_RULES.length + HTML_API_DOC.length + prompt.length + 300;
+  const budget = Math.max(600, MAX_PROMPT_CHARS - reserve);
+  let grounding = buildHtmlGroundingBlock(grounded);
+  if (grounding.length > budget) grounding = buildHtmlGroundingBlock(grounded, 6, 10);
+  const system = `你是一个 AI 全栈页面生成器。根据用户描述，直出一整个 HTML 页面，并让它真正调用平台后端拿数据。\n\n${HTML_STRICT_RULES}\n\n${HTML_API_DOC}\n\n${grounding}`;
+  const html = await callForHtml(prompt, system);
+  return { html };
+}
+
+const HTML_REFINE_RULES = `## 修改要求（严格）
+1. 在现有页面基础上按指令修改，输出【修改后的完整 HTML 文档】（从 <!DOCTYPE html> 到 </html>）
+2. 未被指令涉及的部分原样保留，不要丢失已有的取数逻辑与样式
+3. 仍然只能用 window.__ailab.* 访问后端；不要把任何密钥写进页面；外部库仅 https CDN
+4. 只输出这一个完整页面（可放在 \`\`\`html 代码块内），不要解释、不要只给局部片段`;
+
+export async function refineHtml(currentHtml: string, instruction: string, resources?: ResourceInfo[]): Promise<HtmlGenerateResult> {
+  const grounded = resources ?? (await loadGrounding());
+  const src = String(currentHtml || "").trim();
+  if (!src) throw new Error("当前还没有页面，请先生成再追问修改");
+  // 后端对 system 有长度上限（约 32000），整页源码放这里；超限则诚实提示改用左侧源码框手改
+  const system = `${HTML_REFINE_RULES}\n\n${HTML_API_DOC}\n\n${buildHtmlGroundingBlock(grounded, 8, 10)}\n\n## 现有页面源码（请在此基础上修改并回传完整页面）\n${src}`;
+  if (system.length > 30000) {
+    throw new Error("页面较大，AI 整页改写会超出上下文；请直接在左侧源码框手动编辑，或简化后再生成");
+  }
+  const html = await callForHtml(instruction, system);
+  return { html };
+}

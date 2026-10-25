@@ -8,6 +8,7 @@ import {
   Connection,
   DataAnalysis,
   Monitor,
+  Files,
   CircleCheck,
   Refresh,
   QuestionFilled,
@@ -19,6 +20,7 @@ import FormDesigner from "../../lowcode/FormDesigner.vue";
 import FlowDesigner from "../../lowcode/FlowDesigner.vue";
 import ReportDesigner from "../../lowcode/ReportDesigner.vue";
 import ScreenDesigner from "../../lowcode/ScreenDesigner.vue";
+import HtmlDesigner from "../../lowcode/HtmlDesigner.vue";
 import { useLowcodeStore } from "../../lowcode/store";
 import { usePublishStore } from "../../lowcode/publish";
 
@@ -35,7 +37,7 @@ onMounted(() => window.addEventListener("ailab:chats-dirty", onChatsDirty));
 onBeforeUnmount(() => window.removeEventListener("ailab:chats-dirty", onChatsDirty));
 
 // 当前设计器页签
-const active = ref<"page" | "form" | "flow" | "report" | "screen">("page");
+const active = ref<"page" | "form" | "flow" | "report" | "screen" | "html">("page");
 
 // 支持从「应用中心 · 重新设计」跳转：/lowcode?tab=form
 const route = useRoute();
@@ -43,7 +45,7 @@ watch(
   () => route.query.tab,
   (t) => {
     const key = String(t || "");
-    if (["page", "form", "flow", "report", "screen"].includes(key)) {
+    if (["page", "form", "flow", "report", "screen", "html"].includes(key)) {
       active.value = key as typeof active.value;
     }
   },
@@ -71,6 +73,7 @@ const TABS = [
   { key: "flow" as const, label: "流程设计", icon: Connection, desc: "审批流 · 条件分支" },
   { key: "report" as const, label: "报表设计", icon: DataAnalysis, desc: "数据集 · 图表" },
   { key: "screen" as const, label: "大屏设计", icon: Monitor, desc: "可视化 · 数据大屏" },
+  { key: "html" as const, label: "AI 自由页面", icon: Files, desc: "AI 直出整页 · 对接后端" },
 ];
 
 const docVisible = ref(false);
@@ -163,6 +166,7 @@ function designerFor(key: string) {
   if (key === "flow") return FlowDesigner;
   if (key === "report") return ReportDesigner;
   if (key === "screen") return ScreenDesigner;
+  if (key === "html") return HtmlDesigner;
   return PageDesigner;
 }
 </script>

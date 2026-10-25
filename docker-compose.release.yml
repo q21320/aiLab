@@ -46,6 +46,8 @@ services:
       AILAB_HOST: 0.0.0.0
       AILAB_NO_OPEN: "1"
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # 台账附件单文件大小上限（MB）；二进制存 PostgreSQL，不依赖容器文件系统
+      AILAB_UPLOAD_MAX_MB: ${AILAB_UPLOAD_MAX_MB:-10}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "${APP_PORT:-3800}:3800"

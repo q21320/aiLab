@@ -24,11 +24,64 @@ export interface MenuItem {
 }
 
 const LS_KEY = "ailab.menus.v1";
+/** 菜单配置版本：结构性调整时 +1，老配置在读取时按版本补齐 */
+const MENU_VERSION_KEY = "ailab.menus.v1.version";
+const MENU_VERSION = 9;
 
 let seq = 0;
 export function menuId(): string {
   seq += 1;
   return `menu_${Date.now().toString(36)}_${seq}`;
+}
+
+type MenuPreset = Omit<MenuItem, "id" | "children"> & { children?: Omit<MenuItem, "id">[] };
+
+/** 「实验室管理」下的业务模块（默认菜单与老配置迁移共用同一份定义）
+ *  项目与财务都是“一对”模块 → 各自进子分组，菜单层级保持对称 */
+const LAB_MENU_PRESETS: MenuPreset[] = [
+  {
+    title: "项目管理",
+    icon: "Folder",
+    path: "",
+    roles: ["admin", "operator"],
+    enable: true,
+    children: [
+      { title: "测试项目", icon: "Tickets", path: "/lab/projects", roles: ["admin", "operator"], enable: true },
+      { title: "委外项目", icon: "Van", path: "/lab/outsource-projects", roles: ["admin", "operator"], enable: true },
+    ],
+  },
+  { title: "客户信息", icon: "Service", path: "/lab/customers", roles: ["admin", "operator"], enable: true },
+  { title: "设备信息", icon: "Monitor", path: "/lab/equipment", roles: ["admin", "operator"], enable: true },
+  { title: "耗材信息", icon: "Box", path: "/lab/consumables", roles: ["admin", "operator"], enable: true },
+  { title: "日常报销", icon: "Coin", path: "/lab/reimbursements", roles: ["admin", "operator"], enable: true },
+  {
+    title: "财务管理",
+    icon: "Money",
+    path: "",
+    roles: ["admin"],
+    enable: true,
+    children: [
+      { title: "收入项目", icon: "TrendCharts", path: "/lab/finance/income", roles: ["admin"], enable: true },
+      { title: "支出项目", icon: "Histogram", path: "/lab/finance/expense", roles: ["admin"], enable: true },
+    ],
+  },
+];
+
+/** 「系统管理」下的固定入口（角色权限页为新增，需对老配置做补齐迁移） */
+const SYSTEM_MENU_PRESETS: MenuPreset[] = [
+  { title: "导航菜单", icon: "Menu", path: "/menus", roles: ["admin"], enable: true },
+  { title: "角色权限", icon: "Lock", path: "/roles", roles: ["admin"], enable: true },
+  { title: "操作日志", icon: "Notebook", path: "/logs", roles: ["admin"], enable: true },
+  { title: "用户管理", icon: "UserFilled", path: "/user", roles: ["admin"], enable: true },
+  { title: "系统设置", icon: "Setting", path: "/setting", roles: ["admin"], enable: true },
+];
+
+function makeMenu(preset: MenuPreset): MenuItem {
+  return {
+    id: menuId(),
+    ...preset,
+    children: preset.children?.map((c) => ({ id: menuId(), ...c })),
+  };
 }
 
 /** 默认多级导航（与平台功能对应；叶子节点的角色与路由守卫保持一致） */
@@ -41,13 +94,13 @@ export function defaultMenus(): MenuItem[] {
       icon: "Grid",
       path: "",
       roles: [],
-      enable: true,
+      enable: false,
       children: [
         { id: menuId(), title: "平台工作台", icon: "MagicStick", path: "/lowcode", roles: ["admin"], enable: true },
         { id: menuId(), title: "表单数据", icon: "Document", path: "/formdata", roles: ["admin", "operator"], enable: true },
       ],
     },
-    { id: menuId(), title: "应用中心", icon: "Star", path: "/apps", roles: [], enable: true },
+    { id: menuId(), title: "应用中心", icon: "Star", path: "/apps", roles: [], enable: false },
     {
       id: menuId(),
       title: "工业物联",
@@ -63,14 +116,15 @@ export function defaultMenus(): MenuItem[] {
     },
     {
       id: menuId(),
-      title: "生产管理",
+      title: "实验室管理",
       icon: "Operation",
       path: "",
       roles: [],
       enable: true,
       children: [
-        { id: menuId(), title: "排产管理", icon: "Operation", path: "/production", roles: ["admin", "operator"], enable: true },
-        { id: menuId(), title: "样品管理", icon: "Box", path: "/samples", roles: ["admin", "operator"], enable: true },
+        { id: menuId(), title: "排产管理", icon: "Operation", path: "/production", roles: ["admin", "operator"], enable: false },
+        { id: menuId(), title: "样品管理", icon: "Box", path: "/samples", roles: ["admin", "operator"], enable: false },
+        ...LAB_MENU_PRESETS.map(makeMenu),
       ],
     },
     {
@@ -80,12 +134,7 @@ export function defaultMenus(): MenuItem[] {
       path: "",
       roles: [],
       enable: true,
-      children: [
-        { id: menuId(), title: "导航菜单", icon: "Menu", path: "/menus", roles: ["admin"], enable: true },
-        { id: menuId(), title: "操作日志", icon: "Notebook", path: "/logs", roles: ["admin"], enable: true },
-        { id: menuId(), title: "用户管理", icon: "UserFilled", path: "/user", roles: ["admin"], enable: true },
-        { id: menuId(), title: "系统设置", icon: "Setting", path: "/setting", roles: ["admin"], enable: true },
-      ],
+      children: SYSTEM_MENU_PRESETS.map(makeMenu),
     },
   ];
 }
@@ -103,30 +152,146 @@ function normalize(items: MenuItem[]): MenuItem[] {
   }));
 }
 
+/** 历史菜单迁移（v2）：分组与页面改名。
+ *  按 path 匹配而非 title，避免将来新增的同名模块被误改。 */
+const LEGACY_TITLES: Record<string, string> = {
+  生产管理: "实验室管理",
+};
+const LEGACY_TITLE_BY_PATH: Record<string, string> = {
+  "/production": "排产管理",
+  "/samples": "样品管理",
+  // v7：「项目信息」拆为测试 / 委外两个模块，老菜单项按路径改名
+  "/lab/projects": "测试项目",
+};
+
+function migrateTitles(items: MenuItem[]): MenuItem[] {
+  return items.map((it) => {
+    let title = LEGACY_TITLES[it.title] || it.title;
+    if (it.path && LEGACY_TITLE_BY_PATH[it.path]) title = LEGACY_TITLE_BY_PATH[it.path];
+    return { ...it, title, children: it.children ? migrateTitles(it.children) : it.children };
+  });
+}
+
+/** 结构性迁移（v3、v7、v8）：在「实验室管理」下补齐新增模块，并把成对模块收进子分组。
+ *  菜单存 localStorage，只改默认值对用过的浏览器无效；按 path 去重，不覆盖用户已有配置。 */
+function ensureLabMenus(items: MenuItem[]): MenuItem[] {
+  const group = items.find((it) => it.title === "实验室管理" && Array.isArray(it.children));
+  if (!group?.children) return items;
+  const children = group.children;
+  const paths = new Set(flattenMenus(items).map((m) => m.path).filter(Boolean));
+  // 插入位置跟预设顺序：放在「上一个已存在的预设项」之后，新模块不会掉到分组末尾
+  let insertAt = 0;
+  for (const preset of LAB_MENU_PRESETS) {
+    if (preset.children) {
+      let sub = children.find((c) => c.title === preset.title && Array.isArray(c.children));
+      if (!sub) {
+        sub = { ...makeMenu(preset), children: [] };
+        children.splice(insertAt, 0, sub);
+      }
+      sub.children = sub.children || [];
+      for (const child of preset.children) {
+        const existing = sub.children.find((c) => c.path === child.path);
+        // v7 曾把新模块直接平铺在本分组下 → 搬进子分组，避免同一路径出现两个菜单项
+        const flatAt = children.findIndex((c) => c !== sub && c.path === child.path);
+        if (flatAt >= 0) {
+          const flat = children.splice(flatAt, 1)[0];
+          if (existing) sub.children.splice(sub.children.indexOf(existing), 1);
+          sub.children.push({ ...flat, title: child.title || flat.title });
+          continue;
+        }
+        if (existing) continue;
+        // paths 里有但不在本分组也不在子分组：用户自己把它改放到了别处，不重复加
+        if (paths.has(child.path)) continue;
+        sub.children.push({ id: menuId(), ...child });
+      }
+      const gi = children.findIndex((c) => c.title === preset.title);
+      if (gi >= 0) insertAt = gi + 1;
+      continue;
+    }
+    const at = children.findIndex((c) => c.path === preset.path);
+    if (at >= 0) {
+      insertAt = at + 1;
+      continue;
+    }
+    if (paths.has(preset.path)) continue;
+    children.splice(insertAt, 0, makeMenu(preset));
+    insertAt += 1;
+  }
+  return items;
+}
+
+/** 按 path 去重补齐指定分组下缺失的菜单（存 localStorage，只改默认值对老浏览器无效） */
+function ensureGroupMenus(items: MenuItem[], groupTitle: string, presets: MenuPreset[]): MenuItem[] {
+  const group = items.find((it) => it.title === groupTitle);
+  if (!group) return items;
+  const paths = new Set(flattenMenus(items).map((m) => m.path).filter(Boolean));
+  const missing = presets.filter((p) => p.path && !paths.has(p.path));
+  if (!missing.length) return items;
+  group.children = group.children || [];
+  // 逐个按预设顺序插入到「前一个已有预设项」之后，保持预设项相邻且不乱序，用户自加的菜单不受影响
+  const missingKeys = new Set(missing.map((p) => p.path));
+  let insertAt = 0;
+  for (const preset of presets) {
+    const at = group.children.findIndex((c) => c.path === preset.path);
+    if (at >= 0) {
+      insertAt = at + 1;
+      continue;
+    }
+    if (!missingKeys.has(preset.path)) continue;
+    group.children.splice(insertAt, 0, makeMenu(preset));
+    insertAt += 1;
+  }
+  return items;
+}
+
+/** 隐藏入口（v4）：暂时不对用户展示的菜单。
+ *  用 enable=false 而不是删除：配置仍在，可在「系统管理→导航菜单」里随时重新启用。 */
+const HIDDEN_MENU_TITLES = new Set(["低代码平台"]);
+const HIDDEN_MENU_PATHS = new Set(["/production", "/samples", "/apps"]);
+
+function hideMenus(items: MenuItem[]): MenuItem[] {
+  return items.map((it) => ({
+    ...it,
+    enable: HIDDEN_MENU_TITLES.has(it.title) || (it.path && HIDDEN_MENU_PATHS.has(it.path)) ? false : it.enable,
+    children: it.children ? hideMenus(it.children) : it.children,
+  }));
+}
+
 function loadLocal(): MenuItem[] | null {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length ? normalize(parsed) : null;
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+    let items = normalize(parsed);
+    const version = Number(localStorage.getItem(MENU_VERSION_KEY) || 0);
+    if (version < MENU_VERSION) {
+      items = ensureLabMenus(migrateTitles(items));
+      items = hideMenus(items);
+      // v6：「系统管理」补上「角色权限」入口（页面可见性已由服务端权限控制）
+      items = ensureGroupMenus(items, "系统管理", SYSTEM_MENU_PRESETS);
+      localStorage.setItem(LS_KEY, JSON.stringify(items));
+      localStorage.setItem(MENU_VERSION_KEY, String(MENU_VERSION));
+    }
+    return items;
   } catch {
     return null;
   }
 }
 
-/** 按角色 + 启用状态过滤（父节点无子节点时自动隐藏） */
-export function filterMenus(items: MenuItem[], role: UserRole): MenuItem[] {
+/** 按「页面权限 + 启用状态」过滤（父节点无可见子节点时自动隐藏）。
+ *  注：MenuItem.roles 已废弃——可见性由服务端「角色权限」统一决定，避免菜单页与权限页两处配置打架。 */
+export function filterMenus(items: MenuItem[], canView: (path: string) => boolean): MenuItem[] {
   const out: MenuItem[] = [];
   for (const it of items) {
     if (!it.enable) continue;
-    if (it.roles.length && !it.roles.includes(role)) continue;
     if (it.children && it.children.length) {
-      const kids = filterMenus(it.children, role);
+      const kids = filterMenus(it.children, canView);
       if (kids.length) out.push({ ...it, children: kids });
       continue;
     }
-    // 叶子节点：有 path 才显示
-    if (it.path) out.push(it);
+    // 叶子节点：有 path 且当前身份可见才显示
+    if (it.path && canView(it.path)) out.push(it);
   }
   return out;
 }

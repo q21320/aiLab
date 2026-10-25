@@ -28,12 +28,14 @@
 
 import http from "node:http";
 import net from "node:net";
+import { gzipSync } from "node:zlib";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, appendFileSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { join, extname, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { createIotExtraRoutes } from "./iot/api.mjs";
 import { createFormRoutes } from "./forms.mjs";
 import { createCrudRoutes } from "./crud.mjs";
+import { createUploadRoutes } from "./upload.mjs";
 import { createAuditRoutes } from "./audit.mjs";
 import { createProductionRoutes } from "./production.mjs";
 import { createSampleRoutes } from "./samples.mjs";
@@ -46,6 +48,7 @@ import { createAlertStore } from "./iot/alerts.mjs";
 import { createPointStore } from "./iot/points.mjs";
 import { createNotifier } from "./iot/notify.mjs";
 import { createAuth, ROLE_LABELS } from "./auth.mjs";
+import { createAcl, PAGE_GROUPS, ALL_PAGE_PATHS } from "./acl.mjs";
 import { createDatabase } from "./db.mjs";
 import { paths } from "./paths.mjs";
 import { assets } from "./assets.mjs";
@@ -132,6 +135,70 @@ function cacheHeaderFor(rel) {
   return "public, max-age=3600";
 }
 
+// ---------------------------------------------------------------------------
+// 响应压缩（gzip）
+// 慢链路（跨校区路由 / VPN / 移动网络）上，首屏字节数直接决定等待时长：
+// 本项目主 JS 产物 1.24MB，gzip 后 389KB（↓68%）。
+// 带哈希的静态产物按「路径+长度+mtime」缓存压缩结果，同一文件只压一次。
+// ---------------------------------------------------------------------------
+const GZIP_MIN_BYTES = 1024; // 1KB 以下不值得压：CPU 开销与头部成本大于收益
+const TEXT_ASSET = /\.(js|mjs|css|json|map|svg|txt|html?)([?#]|$)/i;
+const staticGzipCache = new Map();
+const STATIC_GZIP_CACHE_MAX = 128;
+
+function acceptsGzip(req) {
+  return /\bgzip\b/.test(String(req?.headers?.["accept-encoding"] || ""));
+}
+
+/** 压不动（图片等已压缩内容）时返回 null，由调用方原样输出 */
+function tryGzip(buf) {
+  try {
+    const z = gzipSync(buf, { level: 6 });
+    return z.length < buf.length ? z : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 在已有 Vary（CORS 会写 Origin）基础上追加，避免被 writeHead 的同名头覆盖 */
+function mergeVary(res, token) {
+  const list = String(res.getHeader("Vary") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!list.includes(token)) list.push(token);
+  return list.join(", ");
+}
+
+/** 统一的静态资源响应：按需 gzip + 显式 Content-Length（浏览器才能给出真实进度） */
+function sendStatic(res, rel, mime, cache, buf, mtimeMs) {
+  const headers = { "Content-Type": mime, "Cache-Control": cache };
+  let body = buf;
+  if (TEXT_ASSET.test(rel) && buf.length > GZIP_MIN_BYTES && acceptsGzip(res.req)) {
+    const cacheable = rel.startsWith("assets/");
+    let z;
+    if (cacheable) {
+      const key = `${rel}@${buf.length}@${mtimeMs || 0}`;
+      if (staticGzipCache.has(key)) z = staticGzipCache.get(key);
+      else {
+        z = tryGzip(buf);
+        if (staticGzipCache.size >= STATIC_GZIP_CACHE_MAX) staticGzipCache.clear();
+        staticGzipCache.set(key, z);
+      }
+    } else {
+      z = tryGzip(buf);
+    }
+    if (z) {
+      body = z;
+      headers["Content-Encoding"] = "gzip";
+      headers["Vary"] = "Accept-Encoding";
+    }
+  }
+  headers["Content-Length"] = String(body.length);
+  res.writeHead(200, headers);
+  res.end(body);
+}
+
 /** 资源缺失：返回明确的 404（绝不返回 HTML，避免浏览器严格 MIME 校验报错） */
 function sendAsset404(res, rel) {
   res.writeHead(404, {
@@ -156,8 +223,7 @@ function serveStatic(res, path) {
   if (assets.embedded) {
     const hit = assets.embedded[rel];
     if (hit) {
-      res.writeHead(200, { "Content-Type": mimeOf(rel), "Cache-Control": cacheHeaderFor(rel) });
-      res.end(Buffer.from(hit, "base64"));
+      sendStatic(res, rel, mimeOf(rel), cacheHeaderFor(rel), Buffer.from(hit, "base64"));
       return true;
     }
     if (isAsset) {
@@ -167,8 +233,7 @@ function serveStatic(res, path) {
     }
     // 前端路由（如 /apps、/iot）回退到 index.html
     if (assets.embedded["index.html"]) {
-      res.writeHead(200, { "Content-Type": MIME[".html"], "Cache-Control": "no-store" });
-      res.end(Buffer.from(assets.embedded["index.html"], "base64"));
+      sendStatic(res, "index.html", MIME[".html"], "no-store", Buffer.from(assets.embedded["index.html"], "base64"));
       return true;
     }
     return false;
@@ -189,8 +254,7 @@ function serveStatic(res, path) {
     if (st && st.isFile()) {
       try {
         const buf = readFileSync(full);
-        res.writeHead(200, { "Content-Type": mimeOf(rel), "Cache-Control": cacheHeaderFor(rel) });
-        res.end(buf);
+        sendStatic(res, rel, mimeOf(rel), cacheHeaderFor(rel), buf, st.mtimeMs);
         return true;
       } catch {
         /* 读取失败时按缺失处理 */
@@ -202,8 +266,7 @@ function serveStatic(res, path) {
     }
     const indexFile = join(paths.publicDir, "index.html");
     if (safeStat(indexFile)?.isFile()) {
-      res.writeHead(200, { "Content-Type": MIME[".html"], "Cache-Control": "no-store" });
-      res.end(readFileSync(indexFile));
+      sendStatic(res, "index.html", MIME[".html"], "no-store", readFileSync(indexFile));
       return true;
     }
   }
@@ -318,10 +381,10 @@ async function migrateLegacyJson() {
           resource,
           JSON.stringify(res.fields || []),
         ]);
-        for (const row of res.rows || []) {
+        for (const [i, row] of (res.rows || []).entries()) {
           await db.query(
-            "INSERT INTO crud_rows (resource, id, data, updated_at) VALUES ($1,$2,$3::jsonb,$4) ON CONFLICT DO NOTHING",
-            [resource, String(row.id), JSON.stringify(row), Number(row.updatedAt) || Date.now()],
+            "INSERT INTO crud_rows (resource, id, data, updated_at, seq) VALUES ($1,$2,$3::jsonb,$4,$5) ON CONFLICT DO NOTHING",
+            [resource, String(row.id), JSON.stringify(row), Number(row.updatedAt) || Date.now(), i],
           );
         }
       }
@@ -665,6 +728,9 @@ function computeOverview(points) {
 // SSE 实时推送
 // ---------------------------------------------------------------------------
 const clients = new Set();
+// 单条 SSE 会长期独占浏览器的一个连接（HTTP/1.1 每主机上限 6 条），慢链路上
+// 其余接口请求只能排队，表现为「等待中」。超时主动结束，前端 5s 后自动重连。
+const SSE_MAX_AGE_MS = 10 * 60 * 1000;
 function broadcast(payload) {
   const data = `data: ${JSON.stringify(payload)}\n\n`;
   for (const res of clients) {
@@ -710,8 +776,20 @@ function corsHeaders(req, res) {
 }
 function sendJSON(res, code, body) {
   corsHeaders(res.req, res);
-  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body));
+  let buf = Buffer.from(JSON.stringify(body), "utf-8");
+  const headers = { "Content-Type": "application/json; charset=utf-8" };
+  if (buf.length > GZIP_MIN_BYTES && acceptsGzip(res.req)) {
+    const z = tryGzip(buf);
+    if (z) {
+      buf = z;
+      headers["Content-Encoding"] = "gzip";
+      // CORS 已 setHeader("Vary","Origin")，这里必须合并而非直接覆盖
+      headers["Vary"] = mergeVary(res, "Accept-Encoding");
+    }
+  }
+  headers["Content-Length"] = String(buf.length);
+  res.writeHead(code, headers);
+  res.end(buf);
 }
 /** 安全解码路径参数：非法百分号编码返回 400 而不是抛错 */
 function safeDecode(v) {
@@ -832,8 +910,11 @@ const aiRoutes = createAiRoutes({
   },
 });
 
+// 角色权限（RBAC）：角色 = 名称 + 页面权限，菜单/路由/接口三处共用同一份配置
+const acl = await createAcl({ db });
+
 // 服务端会话与鉴权（存储：PostgreSQL users / sessions 表）
-const auth = await createAuth({ db });
+const auth = await createAuth({ db, acl });
 
 // 低代码表单提交与数据存储
 const formRoutes = createFormRoutes({ sendJSON, readBody, db });
@@ -843,7 +924,8 @@ const crudRoutes = createCrudRoutes({ sendJSON, readBody, db, database: db });
 // 从数据库加载 CRUD 初始数据（迁移后的旧数据或已有数据）
 {
   const resRows = await db.query("SELECT resource, fields FROM crud_resources");
-  const rowsRes = await db.query("SELECT resource, data FROM crud_rows ORDER BY updated_at ASC");
+  // 台账顺序取持久化的 seq（与内存模型一致）；老库 seq 全为 0 时按 updated_at 倒序兜底，保持「新→旧」
+  const rowsRes = await db.query("SELECT resource, data FROM crud_rows ORDER BY resource, seq, updated_at DESC");
   const hydrated = {};
   for (const r of resRows.rows) hydrated[r.resource] = { fields: r.fields, rows: [] };
   for (const r of rowsRes.rows) {
@@ -851,6 +933,53 @@ const crudRoutes = createCrudRoutes({ sendJSON, readBody, db, database: db });
     hydrated[r.resource].rows.push(r.data);
   }
   if (Object.keys(hydrated).length) crudRoutes.hydrate(hydrated);
+}
+
+/**
+ * 汇总全量备份（/api/backup 导出与服务端快照共用一份，避免两边口径漂移）。
+ * 覆盖：低代码应用 / 物联网 / 排产 / 样品 / 台账(CRUD) / 表单提交 / 用户 / 角色。
+ * 不含台账附件二进制：BYTEA 转 base64 会让 JSON 备份暴涨（单文件可达 10MB），
+ *   附件的物理安全依赖 pgdata 卷（见 db.mjs 注释），恢复端同样不碰 attachments 表。
+ */
+async function collectBackup() {
+  const fsRes = await db.query(
+    "SELECT id, form_id, form_name, data, submitted_at FROM form_submissions ORDER BY submitted_at DESC",
+  );
+  const usRes = await db.query(
+    "SELECT username, name, role, pass_hash, enabled FROM users ORDER BY created_at ASC, username ASC",
+  );
+  const rsRes = await db.query("SELECT key, name, builtin, pages FROM roles ORDER BY builtin DESC, created_at ASC");
+  return {
+    exportedAt: Date.now(),
+    storage: "PostgreSQL",
+    apps,
+    iot: iotState,
+    production: await readJson("production", null),
+    samples: await readJson("samples", null),
+    // 台账整体取内存模型快照，与恢复端 data.crud 形状一致（{资源:{fields,rows}}）
+    crud: crudRoutes.snapshot(),
+    formSubmissions: fsRes.rows.map((r) => ({
+      id: r.id,
+      formId: r.form_id,
+      formName: r.form_name || "",
+      data: r.data,
+      submittedAt: Number(r.submitted_at),
+    })),
+    // 含密码散列：恢复后账号可直接登录（备份仅管理员可导出，散列为 SHA-256）
+    users: usRes.rows.map((r) => ({
+      username: r.username,
+      name: r.name,
+      role: r.role,
+      passHash: r.pass_hash,
+      enabled: r.enabled !== false,
+    })),
+    roles: rsRes.rows.map((r) => ({
+      key: r.key,
+      name: r.name,
+      builtin: !!r.builtin,
+      pages: typeof r.pages === "string" ? JSON.parse(r.pages) : r.pages || {},
+    })),
+  };
 }
 
 // 低代码平台 · 设计器工程（设计态）· 存储：PostgreSQL kv_documents.lowcode_projects
@@ -899,6 +1028,10 @@ const auditRoutes = createAuditRoutes({
   },
 });
 
+// 台账附件（项目「委外测试 / 测试结果」等 file 字段）：二进制存 PostgreSQL，
+// 权限按「附件来源台账所属页面」判定，与台账本体同一口径
+const uploadRoutes = createUploadRoutes({ sendJSON, db, auth, acl, audit: auditRoutes });
+
 // ---------------------------------------------------------------------------
 // 路由
 // ---------------------------------------------------------------------------
@@ -935,7 +1068,7 @@ async function handle(req, res) {
       role: result.role,
       module: "权限",
       action: "登录",
-      detail: `${result.name} 以「${ROLE_LABELS[result.role] || result.role}」身份登录系统`,
+      detail: `${result.name} 以「${(await acl.resolve(result.role)).name}」身份登录系统`,
     });
     const { token, session, ...user } = result;
     return sendJSON(res, 200, { ok: true, user });
@@ -953,6 +1086,21 @@ async function handle(req, res) {
     const s = await auth.getSession(req);
     if (!s) return sendJSON(res, 200, { ok: true, user: null });
     return sendJSON(res, 200, { ok: true, user: { username: s.username, name: s.name, role: s.role } });
+  }
+
+  // 当前身份的页面权限（菜单/路由据此渲染；无会话返回空权限）
+  if (method === "GET" && path === "/api/auth/acl") {
+    const s = await auth.getSession(req);
+    if (!s) return sendJSON(res, 200, { ok: true, user: null, admin: false, pages: {}, guarded: ALL_PAGE_PATHS });
+    const { admin, name, pages } = await acl.resolve(s.role);
+    return sendJSON(res, 200, {
+      ok: true,
+      user: { username: s.username, name: s.name, role: s.role, roleName: name },
+      admin,
+      pages,
+      // 需要显式授权的页面清单：前端据此区分「未登记页面」与「无权限页面」
+      guarded: ALL_PAGE_PATHS,
+    });
   }
 
   // ---------------- 统一鉴权守卫 ----------------
@@ -1006,6 +1154,45 @@ async function handle(req, res) {
     }
   }
 
+  // 角色权限（仅管理员：/api/roles 在 ADMIN_ONLY_RULES 中）
+  if (path === "/api/roles" && method === "GET") {
+    return sendJSON(res, 200, { ok: true, roles: await acl.list(), groups: PAGE_GROUPS });
+  }
+  if (path === "/api/roles" && method === "POST") {
+    const body = await readBody(req).catch(() => ({}));
+    const r = await acl.save({ name: body?.name, pages: body?.pages });
+    if (!r.ok) return sendJSON(res, 400, { error: r.error });
+    const s = await auth.getSession(req);
+    await auditRoutes.log({ user: s.name, role: s.role, module: "权限", action: "新增角色", detail: `新增角色「${body?.name}」` });
+    return sendJSON(res, 200, { ok: true, key: r.key });
+  }
+  if (path.startsWith("/api/roles/")) {
+    const key = safeDecode(path.slice("/api/roles/".length));
+    if (method === "PUT") {
+      const body = await readBody(req).catch(() => ({}));
+      const before = await acl.get(key);
+      const r = await acl.save({ key, name: body?.name ?? before?.name, pages: body?.pages });
+      if (!r.ok) return sendJSON(res, 400, { error: r.error });
+      const s = await auth.getSession(req);
+      await auditRoutes.log({
+        user: s.name,
+        role: s.role,
+        module: "权限",
+        action: "调整角色权限",
+        detail: `角色「${before?.name || key}」名称/页面权限变更，影响使用该角色的全部用户`,
+      });
+      return sendJSON(res, 200, { ok: true });
+    }
+    if (method === "DELETE") {
+      const before = await acl.get(key);
+      const r = await acl.remove(key);
+      if (!r.ok) return sendJSON(res, 400, { error: r.error });
+      const s = await auth.getSession(req);
+      await auditRoutes.log({ user: s.name, role: s.role, module: "权限", action: "删除角色", detail: `删除角色「${before?.name || key}」` });
+      return sendJSON(res, 200, { ok: true });
+    }
+  }
+
   // 设备接入 / 真实设备读写 / 虚拟仪器 / 自动化测试
   if (await iotExtra(req, res, path, method)) return;
 
@@ -1014,6 +1201,9 @@ async function handle(req, res) {
 
   // 通用 CRUD（数据表格组件数据源）
   if (await crudRoutes(req, res, path, method)) return;
+
+  // 台账附件（项目「委外测试 / 测试结果」等 file 字段）
+  if (await uploadRoutes(req, res, path, method)) return;
 
   // 操作日志（审计）
   if (await auditRoutes(req, res, path, method)) return;
@@ -1282,28 +1472,34 @@ async function handle(req, res) {
     });
     res.write(`data: ${JSON.stringify({ hello: true, time: Date.now() })}\n\n`);
     clients.add(res);
-    req.on("close", () => clients.delete(res));
+    const maxTimer = setTimeout(() => {
+      clients.delete(res);
+      try {
+        res.write(": reach-max-age\n\n");
+        res.end();
+      } catch {
+        /* 连接已断 */
+      }
+    }, SSE_MAX_AGE_MS);
+    req.on("close", () => {
+      clearTimeout(maxTimer);
+      clients.delete(res);
+    });
     return;
   }
 
   // ---------------- 备份与恢复（4.8 数据存储/备份） ----------------
   if (method === "GET" && path === "/api/backup") {
-    // 全量导出：含 IoT 状态与排产数据（此前排产只在浏览器 localStorage，不会进备份）
-    return sendJSON(res, 200, {
-      exportedAt: Date.now(),
-      storage: "PostgreSQL",
-      apps,
-      iot: iotState,
-      production: await readJson("production", null),
-      samples: await readJson("samples", null),
-    });
+    // 全量导出：应用/物联网/排产/样品 + 台账/表单提交/用户/角色（组装见 collectBackup）。
+    // 附件二进制不入 JSON：靠 pgdata 卷做物理备份，恢复端也不碰 attachments 表。
+    return sendJSON(res, 200, await collectBackup());
   }
   if (method === "POST" && path === "/api/backup/snapshot") {
     try {
       mkdirSync(BACKUP_DIR, { recursive: true });
       const name = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-      const prodForSnapshot = await readJson("production", null);
-      writeFileSync(join(BACKUP_DIR, name), JSON.stringify({ apps, iot: iotState, production: prodForSnapshot }, null, 2), "utf-8");
+      // 快照与在线导出共用 collectBackup：此前快照只写 apps/iot/production，归档里恰恰没有台账数据
+      writeFileSync(join(BACKUP_DIR, name), JSON.stringify(await collectBackup(), null, 2), "utf-8");
       // 保留策略：超过 20 个时删除**最旧**的快照（按 mtime 排序 + unlink）。
       // 原实现按字典序取 files[0] 并把内容写成空字符串 —— 既删错文件又会清空既有快照。
       pruneBackups(MAX_BACKUPS);
@@ -1350,17 +1546,43 @@ async function handle(req, res) {
               resource,
               JSON.stringify(res2.fields || []),
             ]);
-            for (const row of res2.rows || []) {
-              await client.query("INSERT INTO crud_rows (resource, id, data, updated_at) VALUES ($1,$2,$3::jsonb,$4)", [
+            for (const [i, row] of (res2.rows || []).entries()) {
+              await client.query("INSERT INTO crud_rows (resource, id, data, updated_at, seq) VALUES ($1,$2,$3::jsonb,$4,$5)", [
                 resource,
                 String(row.id),
                 JSON.stringify(row),
                 Number(row.updatedAt) || Date.now(),
+                i,
               ]);
             }
           }
         }
+        // 角色：全表覆盖后由事务外 acl.reload() 刷新内存缓存（缺缓存会用旧角色判定新权限）
+        if (Array.isArray(data.roles)) {
+          await client.query("DELETE FROM roles");
+          for (const r2 of data.roles) {
+            if (!r2 || !r2.key) continue;
+            await client.query(
+              "INSERT INTO roles (key, name, builtin, pages) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (key) DO NOTHING",
+              [String(r2.key), String(r2.name || r2.key), !!r2.builtin, JSON.stringify(r2.pages || {})],
+            );
+          }
+        }
+        // 用户：全表覆盖；外键 ON DELETE CASCADE 会清空 sessions（含当前管理员），故需重新登录
+        if (Array.isArray(data.users)) {
+          await client.query("DELETE FROM users");
+          for (const u2 of data.users) {
+            if (!u2 || !u2.username) continue;
+            await client.query(
+              "INSERT INTO users (username, name, role, pass_hash, enabled) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (username) DO NOTHING",
+              [String(u2.username), String(u2.name || u2.username), String(u2.role || "viewer"), u2.passHash, u2.enabled !== false],
+            );
+          }
+        }
       });
+      // 内存同步（关键）：台账与角色都有内存缓存，只写库不同步的话，下一次落库会用旧内存覆盖刚恢复的数据
+      if (data.crud && typeof data.crud === "object") crudRoutes.hydrate(data.crud);
+      await acl.reload();
       return sendJSON(res, 200, { ok: true });
     } catch {
       return sendJSON(res, 400, { error: "恢复失败：JSON 解析错误" });
@@ -1398,6 +1620,13 @@ const server = http.createServer(async (req, res) => {
     }
   }
 });
+
+// 慢链路适配：Node 默认 keepAliveTimeout=5s，跨校区/VPN 场景下浏览器复用空闲连接的
+// 间隔常常超过它 —— 服务端静默关闭连接，下一个请求要么重新握手，要么写进已被网关
+// NAT 丢弃的死连接上，表现为「接口一直等待中」。65s 大于常见网关空闲超时；
+// headersTimeout 必须大于 keepAliveTimeout，否则慢客户端发头会被误杀。
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 70000;
 
 // ---------------------------------------------------------------------------
 // 启动流程（健壮版：端口自动避让 + 已在运行时直接开浏览器 + 永不静默退出）
@@ -1557,5 +1786,22 @@ process.on("uncaughtException", (e) => {
 process.on("unhandledRejection", (e) => {
   startupLog(`未处理的 Promise 拒绝：${e?.stack || e?.message || e}`);
 });
+
+// 优雅关闭：CRUD 落库为异步串行，收到停止信号时先等写队列排空再退出，
+// 避免 docker stop / 关闭窗口带走最后一笔变更（flush 内部会自行排空，这里只限定等待上限）。
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, () => {
+    const deadline = Date.now() + 3000;
+    const stop = async () => {
+      try {
+        await Promise.race([crudRoutes.flush(), new Promise((r) => setTimeout(r, Math.max(0, deadline - Date.now())))]);
+      } catch {
+        /* 落库异常不阻断退出 */
+      }
+      process.exit(0);
+    };
+    void stop();
+  });
+}
 
 bootstrap();

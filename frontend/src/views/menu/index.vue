@@ -1,10 +1,12 @@
 <script setup lang="ts">
 // ============================================================================
 // 导航菜单管理（系统管理 → 导航菜单）
-// 支持多级：新增根/子菜单、编辑（名称/图标/路径/角色/启用）、排序、
+// 支持多级：新增根/子菜单、编辑（名称/图标/路径/启用）、排序、
 // 升级/降级层级、删除、重置默认、导出/导入 JSON 配置。
+// 注：这里只管「导航长什么样」，谁能看到哪个页面由「角色权限」统一决定。
 // ============================================================================
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   Plus,
@@ -16,24 +18,60 @@ import {
   Upload,
   Refresh,
   Rank,
+  Lock,
 } from "@element-plus/icons-vue";
-import { useMenuStore, MENU_ICONS, type MenuItem } from "../../stores/menu";
-import { ROLE_LABELS, type UserRole } from "../../stores/user";
+import { useMenuStore, MENU_ICONS, flattenMenus, type MenuItem } from "../../stores/menu";
+import { pageKeyOf } from "../../stores/acl";
+import { fetchRoles, type RoleInfo } from "../../api/roles";
 
 const store = useMenuStore();
+const router = useRouter();
 
-const ROLES: UserRole[] = ["admin", "operator", "viewer"];
+// ---------------------------------------------------------------------------
+// 角色派生展示（只读）：菜单路径 → 哪些角色能看到它
+// ---------------------------------------------------------------------------
+const roles = ref<RoleInfo[]>([]);
+/** 系统管理类的锁定页：恒仅管理员，不参与角色配置 */
+const LOCKED_PAGES = ["/menus", "/roles", "/logs", "/user", "/setting"];
+
+async function loadRoles() {
+  const r = await fetchRoles();
+  if (r.ok) roles.value = r.roles;
+}
+onMounted(loadRoles);
+
+function rolesForPath(path: string): string[] {
+  const key = pageKeyOf(path);
+  if (!key) return [];
+  if (LOCKED_PAGES.includes(key)) return ["仅管理员"];
+  return roles.value.filter((r) => r.pages[key] === "view" || r.pages[key] === "edit").map((r) => r.name);
+}
+
+/** 分组节点没有路径：合并展示其下子菜单的可见角色，避免这一列看起来空白 */
+const roleTextCache = computed(() => {
+  const cache = new Map<string, string[]>();
+  for (const item of flattenMenus(store.items)) {
+    const names = item.path
+      ? rolesForPath(item.path)
+      : [...new Set((item.children || []).flatMap((c) => rolesForPath(c.path)))];
+    cache.set(item.id, names);
+  }
+  return cache;
+});
+function roleText(item: MenuItem): string {
+  const names = roleTextCache.value.get(item.id) || [];
+  return names.length ? names.join(" / ") : "无人可见";
+}
 
 // ---------------------------------------------------------------------------
 // 编辑弹窗
 // ---------------------------------------------------------------------------
 const dialog = ref(false);
 const editing = ref<MenuItem | null>(null);
-const form = ref<{ title: string; icon: string; path: string; roles: UserRole[]; enable: boolean }>({
+const form = ref<{ title: string; icon: string; path: string; enable: boolean }>({
   title: "",
   icon: "Document",
   path: "",
-  roles: [],
   enable: true,
 });
 
@@ -41,12 +79,12 @@ function openCreate(parentId: string | null) {
   const item = store.addItem(parentId);
   if (!item) return;
   editing.value = item;
-  form.value = { title: item.title, icon: item.icon, path: item.path, roles: [...item.roles], enable: item.enable };
+  form.value = { title: item.title, icon: item.icon, path: item.path, enable: item.enable };
   dialog.value = true;
 }
 function openEdit(item: MenuItem) {
   editing.value = item;
-  form.value = { title: item.title, icon: item.icon, path: item.path, roles: [...item.roles], enable: item.enable };
+  form.value = { title: item.title, icon: item.icon, path: item.path, enable: item.enable };
   dialog.value = true;
 }
 function saveForm() {
@@ -59,7 +97,6 @@ function saveForm() {
     title: form.value.title.trim(),
     icon: form.value.icon,
     path: form.value.path.trim(),
-    roles: [...form.value.roles],
     enable: form.value.enable,
   });
   dialog.value = false;
@@ -117,9 +154,6 @@ function resetMenus() {
 // ---------------------------------------------------------------------------
 const previewRows = computed(() => store.items);
 
-function roleText(item: MenuItem): string {
-  return item.roles.length ? item.roles.map((r) => ROLE_LABELS[r]).join(" / ") : "全部角色";
-}
 function pathHint(item: MenuItem): string {
   return item.path || "分组节点（不跳转）";
 }
@@ -130,7 +164,8 @@ function pathHint(item: MenuItem): string {
     <el-alert type="info" :closable="false" show-icon>
       <template #title>
         左侧导航支持<strong>多级菜单</strong>：新增分组后在其下添加子菜单即可；也可用「降级」把已有项变成上一项的子菜单。
-        角色用于按权限显示（与路由守卫一致），路径支持 <code>/lowcode?tab=page</code> 这类带参数入口。
+        路径支持 <code>/lowcode?tab=page</code> 这类带参数入口。
+        <strong>页面给哪个角色看，请到「系统管理 → 角色权限」配置</strong>；本页的「可见角色」为权限结果实时汇总，不可在此编辑。
       </template>
     </el-alert>
 
@@ -139,6 +174,7 @@ function pathHint(item: MenuItem): string {
       <el-button :icon="Download" @click="exportJson">导出配置</el-button>
       <el-button :icon="Upload" @click="importVisible = true">导入配置</el-button>
       <el-button :icon="Refresh" @click="resetMenus">恢复默认</el-button>
+      <el-button :icon="Lock" @click="router.push('/roles')">角色权限</el-button>
       <span class="hint">共 {{ store.total }} 个菜单项（含子菜单）</span>
     </div>
 
@@ -155,8 +191,10 @@ function pathHint(item: MenuItem): string {
           <span :class="{ muted: !row.path }">{{ pathHint(row) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="可见角色" width="150">
-        <template #default="{ row }">{{ roleText(row) }}</template>
+      <el-table-column label="可见角色（按权限配置）" min-width="220">
+        <template #default="{ row }">
+          <span :class="{ muted: roleText(row) === '无人可见' }">{{ roleText(row) }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="启用" width="80" align="center">
         <template #default="{ row }">
@@ -192,11 +230,6 @@ function pathHint(item: MenuItem): string {
         </el-form-item>
         <el-form-item label="路由路径">
           <el-input v-model="form.path" placeholder="留空 = 分组节点（不跳转）；如 /production 或 /lowcode?tab=form" />
-        </el-form-item>
-        <el-form-item label="可见角色">
-          <el-select v-model="form.roles" multiple placeholder="不选 = 全部角色可见" style="width: 100%">
-            <el-option v-for="r in ROLES" :key="r" :label="ROLE_LABELS[r]" :value="r" />
-          </el-select>
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="form.enable" />
