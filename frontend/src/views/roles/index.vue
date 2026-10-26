@@ -427,6 +427,13 @@ function grantedCount(role: RoleInfo): number {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* 卡片头部吸顶：17 行权限滚到底再去找「保存权限」要回滚上千像素 */
+.roles-page.is-mobile .panel :deep(.el-card__header) {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #fff;
+}
 .roles-page.is-mobile .head-actions {
   width: 100%;
 }

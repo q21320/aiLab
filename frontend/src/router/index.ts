@@ -181,7 +181,9 @@ const router = createRouter({
 router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore();
   const acl = useAclStore();
-  document.title = (to.meta.title as string) || "实验室数字化管理平台";
+  // 标签页统一「页面名 · 平台名」：只设页面名的话，平台名在浏览器标签上永远不出现
+  const pageTitle = (to.meta.title as string) || "";
+  document.title = pageTitle ? `${pageTitle} · 实验室数字化管理平台` : "实验室数字化管理平台";
 
   // 首次进入（或刷新）时向服务端确认会话，并同步拉取该身份的页面权限
   // 两个 store 各自带节流/就绪标记，登出与登录由调用方重置，无需额外全局开关

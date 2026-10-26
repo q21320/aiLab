@@ -18,6 +18,20 @@
   .el-card__header {
     padding: 10px 12px;
   }
+  /* el-card 默认 overflow:hidden 会让内部 sticky 失效（角色页吸顶工具栏、列表吸底分页条都靠 sticky）；
+     卡片内边距已把内容挡在圆角之外，放开不会漏角 */
+  .el-card {
+    overflow: visible;
+  }
+  /* 分页条吸底：手机上列表动辄几十张卡，滚完再翻页太吃力 */
+  .pager,
+  .pagination {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    padding: 8px 0;
+    background: var(--el-bg-color, #fff);
+  }
 
   /* 工具栏：搜索框 + 若干按钮在窄屏必须换行，且输入框撑满一行
      （类名扫自各台账/设备/告警/自动化测试页，新增同类容器往这里加） */
@@ -145,8 +159,36 @@
     word-break: break-all;
   }
   .el-tabs__item {
-    padding: 0 12px;
-    font-size: 14px;
+    /* 设置页 5 个中文标签：容器只有 ~344px，且 scrollable 状态还会吃 40px 箭头位；
+       14px+12padding 时总宽 377 仍溢出→最后一个标签手指点不到，压到 12px+6 约 281 才能全显 */
+    padding: 0 6px;
+    font-size: 12px;
+  }
+  
+  /* 日期区间面板：EP 两个月历是 display:table-cell 并排（实测宽 646），
+     手机上右半「结束日期」整个在屏外且把页面顶出横向滚动。改成单列堆叠，
+     is-left 的分隔线从右边换到底部；面板宽度跟视口走，popper 不再越屏 */
+  .el-picker-panel.el-date-range-picker {
+    width: calc(100vw - 20px);
+    max-width: 420px;
+  }
+  .el-date-range-picker .el-picker-panel__body {
+    display: block;
+    min-width: 0;
+  }
+  .el-date-range-picker__content {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 8px 12px;
+  }
+  .el-date-range-picker__content.is-left {
+    border-right: 0;
+    border-bottom: 1px solid var(--el-datepicker-inner-border-color);
+  }
+  .el-date-range-picker__time-header {
+    display: block;
+    width: 100%;
   }
 
   /* iOS 上字号 <16px 的输入框获焦会自动放大整页且不会缩回。

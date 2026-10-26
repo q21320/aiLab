@@ -537,10 +537,10 @@ onBeforeUnmount(() => {
             </span>
           </template>
           <el-table :data="recentProjects" size="small" @row-click="openProjectRow">
-            <el-table-column prop="date" label="日期" width="110">
+            <el-table-column prop="date" label="日期" :width="isMobile ? 88 : 110">
               <template #default="{ row }">{{ row.date || "-" }}</template>
             </el-table-column>
-            <el-table-column label="类型" width="70" align="center">
+            <el-table-column label="类型" :width="isMobile ? 56 : 70" align="center">
               <template #default="{ row }">
                 <el-tag size="small" :type="row._kind === '委外' ? 'warning' : 'info'" effect="plain">
                   {{ row._kind }}
@@ -551,10 +551,10 @@ onBeforeUnmount(() => {
             <el-table-column v-if="!isMobile" prop="projectNo" label="项目编号" width="150" show-overflow-tooltip>
               <template #default="{ row }">{{ row.projectNo || "-" }}</template>
             </el-table-column>
-            <el-table-column prop="clientName" label="委托单位" show-overflow-tooltip>
+            <el-table-column prop="clientName" label="委托单位" min-width="80" show-overflow-tooltip>
               <template #default="{ row }">{{ row.clientName || "-" }}</template>
             </el-table-column>
-            <el-table-column label="完成情况" width="100" align="center">
+            <el-table-column label="完成情况" :width="isMobile ? 84 : 100" align="center">
               <template #default="{ row }">
                 <el-tag size="small" effect="plain" :type="progressTagType(row.progress)">
                   {{ row.progress || "未开始" }}

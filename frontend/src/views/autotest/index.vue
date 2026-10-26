@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Delete, VideoPlay, Download, Refresh, EditPen, Top, Bottom } from "@element-plus/icons-vue";
 import {
@@ -29,6 +29,8 @@ const sampleStore = useSampleStore();
 const testableSamples = computed(() => sampleStore.samples.filter((s) => s.status !== "out" && s.status !== "scrapped"));
 const userStore = useUserStore();
 const { isMobile } = useViewport();
+/** 手机端步骤卡容器：新增步骤后自动滚到最后一张 */
+const stepCardsEl = ref<HTMLElement | null>(null);
 
 const plans = ref<AutoTestPlan[]>([]);
 const runs = ref<AutoTestRun[]>([]);
@@ -350,6 +352,13 @@ function addStep(type: AutoTestStep["type"]) {
     judge: { type: "judge", key: "temperature", mode: "absDevLte", ref: 60, value: 3, label: "判定" },
   };
   planForm.value.steps.push({ ...base[type] });
+  // 手机上步骤区不再有内部滚动（避免与弹窗体套两层），新卡片可能落在视口外，
+  // 不主动滚过去用户会以为「点了没反应」
+  if (isMobile.value) {
+    nextTick(() => {
+      stepCardsEl.value?.lastElementChild?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
 }
 function removeStep(i: number) {
   planForm.value.steps.splice(i, 1);
@@ -686,7 +695,7 @@ function openReport(id: string) {
       </el-table>
 
       <!-- 手机端：一步一卡。参数控件与表格版同一套（按 type 分支），只是从「一行八列」改成「卡内换行排」 -->
-      <div v-else class="step-cards">
+      <div v-else class="step-cards" ref="stepCardsEl">
         <div v-for="(row, $index) in planForm.steps" :key="$index" class="m-card">
           <div class="m-card-head">
             <span class="m-card-title">步骤 {{ $index + 1 }}</span>
@@ -764,6 +773,11 @@ function openReport(id: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+/* 窄屏（弹窗 94vw 内）四个步骤按钮加标题放不下：不换行会把弹窗体顶出横向滚动条 */
+.steps-head {
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .panel-title {
   font-weight: 600;
@@ -858,6 +872,7 @@ function openReport(id: string) {
 .step-buttons {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 .param-label {
   color: #909399;
@@ -870,9 +885,8 @@ function openReport(id: string) {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 55vh;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  /* 不设 max-height/overflow：弹窗体本身就是滚动容器，套两层会出现
+     「新步骤落在内层底部、外层滞到上限也够不着」 */
 }
 .step-fields {
   display: grid;

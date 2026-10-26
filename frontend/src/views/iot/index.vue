@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Delete, Connection, Search, VideoPlay, Setting, Refresh, Cpu } from "@element-plus/icons-vue";
@@ -44,6 +44,8 @@ const deviceCards = computed<DeviceRow[]>(() => devices.value as DeviceRow[]);
 const route = useRoute();
 const router = useRouter();
 const { isMobile } = useViewport();
+/** 手机端点位卡容器：新增点位后自动滚到最后一张 */
+const ptCardsEl = ref<HTMLElement | null>(null);
 const jumpHandled = ref(false);
 async function applyJumpQuery() {
   if (jumpHandled.value) return;
@@ -207,6 +209,11 @@ function applyTemplate(protocol: string) {
 }
 function addPointRow() {
   deviceForm.value.points.push({ key: "", label: "" });
+  if (isMobile.value) {
+    nextTick(() => {
+      ptCardsEl.value?.lastElementChild?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }
 }
 function removePointRow(i: number) {
   deviceForm.value.points.splice(i, 1);
@@ -321,8 +328,10 @@ async function refreshWriteBaseline() {
   const id = writeForm.value.deviceId;
   const key = writeForm.value.key;
   if (!id || !key) return;
+  writeBaselineError.value = "";
   const res = await readDevicePoints(id);
-  const v = res?.values?.[key]?.value;
+  const cell = res?.values?.[key];
+  const v = cell?.value;
   if (typeof v === "number") {
     if (writeOutcome.value) {
       writeOutcome.value.after = v;
@@ -330,9 +339,15 @@ async function refreshWriteBaseline() {
     } else {
       writeBaseline.value = v;
     }
+  } else if (!writeOutcome.value) {
+    // 读不到必须明说：以前静默留白，「下发前后对比」这道安全网在设备连不上时
+    // 看着只是「没数据」，实际是根木没基准可比
+    writeBaselineError.value = String(cell?.error || `点位 ${key} 当前读不到数值`);
   }
 }
 const writeBaseline = ref<number | null>(null);
+/** 基准读取失败原因（空串=无失败） */
+const writeBaselineError = ref("");
 
 async function doWrite() {
   if (writeSending.value) return;
@@ -756,7 +771,7 @@ function statusTag(s: string) {
       </el-table>
 
       <!-- 手机端：点位是「八个字段一行的可编辑表」，窄屏改成一点位一卡，两格一行 -->
-      <div v-else class="pt-cards">
+      <div v-else class="pt-cards" ref="ptCardsEl">
         <div v-for="(row, i) in deviceForm.points" :key="i" class="m-card">
           <div class="m-card-head">
             <span class="m-card-title">点位 {{ i + 1 }}</span>
@@ -815,6 +830,10 @@ function statusTag(s: string) {
         </div>
         <el-empty v-if="!readRows.length" description="暂无读数" :image-size="50" />
       </div>
+      <!-- 窄屏只有右上角 × 可关，触摸目标太小；补一个底部关闭按钮 -->
+      <template #footer>
+        <el-button @click="readVisible = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <!-- 下发控制 -->
@@ -830,7 +849,8 @@ function statusTag(s: string) {
       <!-- 下发前基准 -->
       <div v-if="!writeOutcome" class="write-baseline">
         下发前实测值：<b>{{ writeBaseline ?? "—" }}</b>
-        <span class="muted">（打开弹窗时自动读取，用于对比）</span>
+        <span v-if="writeBaselineError" class="baseline-error">读取失败：{{ writeBaselineError }}</span>
+        <span v-else class="muted">（打开弹窗时自动读取，用于对比）</span>
       </div>
 
       <!-- 下发结果：让人一眼看出成功没有、生效了没有 -->
@@ -1024,10 +1044,22 @@ function statusTag(s: string) {
 }
 .sim-info {
   flex: 1;
-  min-width: 260px;
+  /* 固定 260px 下限在窄屏弹窗里撑破容器（标题 right=372 > 367）；改 0 + 省略号，长设备名截断不越界 */
+  min-width: 0;
+}
+/* 窄屏下 flex:1（basis 0）会被图标+按钮挤到只剩 8px，标题/描述完全面目全非；
+   改 basis 100% 让它独占整行，按钮组自然换到下一行 */
+@media (max-width: 767px) {
+  .sim-info {
+    flex: 1 1 100%;
+  }
 }
 .sim-info b {
   color: #1f2d3d;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sim-info p {
   margin: 4px 0 0;
@@ -1067,9 +1099,7 @@ function statusTag(s: string) {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 55vh;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  /* 不设 max-height/overflow：弹窗体已在滚动，套两层会让新增的点位卡在够不着的位置 */
 }
 .pt-grid {
   display: grid;
